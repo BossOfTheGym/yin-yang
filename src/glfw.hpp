@@ -180,6 +180,10 @@ namespace glfw {
 		bool is_mouse_button_pressed(input_key_t key) const;
 		bool is_mouse_button_released(input_key_t key) const;
 
+		inline GLFWwindow* get_handle() const {
+			return window;
+		}
+
 	private:
 		GLFWwindow* window{};
 	};

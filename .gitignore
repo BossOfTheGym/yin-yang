@@ -1,3 +1,4 @@
 .vscode
-build*
+build*/
 vcpkg
+imgui.ini
