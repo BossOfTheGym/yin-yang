@@ -8,6 +8,7 @@
 #include <memory>
 #include <random>
 #include <vector>
+#include <cassert>
 #include <iomanip>
 #include <utility>
 #include <cstdint>
@@ -43,7 +44,7 @@ struct glew_guard_t {
 	}
 };
 
-struct demo_window_t {
+struct demo_widget_t {
 	void render() {
 		if (show) {
 			ImGui::ShowDemoWindow(&show);
@@ -64,12 +65,16 @@ static void help_marker(const char* desc) {
     }
 }
 
-struct sim_gui_t {
+struct sim_widget_t {
 	static constexpr ImGuiWindowFlags flags_init = ImGuiWindowFlags_NoDecoration
 		| ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings
 		| ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoScrollbar;
 
 	void render() {
+		if (!opened) {
+			return;
+		}
+
 		const ImGuiViewport* viewport = ImGui::GetMainViewport();
 		ImGui::SetNextWindowPos(use_work_area ? viewport->WorkPos : viewport->Pos);
 		ImGui::SetNextWindowSize(use_work_area ? viewport->WorkSize : viewport->Size);
@@ -95,8 +100,78 @@ struct sim_gui_t {
 	bool opened{true};
 };
 
-// TODO : render into the texture some procedural shit
-// TODO : render texture into the imgui window
+struct framebuffer_widget_t {
+	static constexpr ImGuiWindowFlags flags_init = 0;
+
+	void render(ImTextureID id, int width, int height) {
+		if (!opened) {
+			return;
+		}
+
+		if (ImGui::Begin("Framebuffer", &opened, flags)) {
+			ImGui::Image(id, ImVec2(width, height));
+		} ImGui::End();
+	}
+
+	ImGuiWindowFlags flags{};
+	bool opened{true};
+};
+
+struct texture_t {
+	texture_t() = default;
+	texture_t(GLuint _id, int _width, int _height) : id{_id}, width{_width}, height{_height} {}
+
+	~texture_t() {
+		if (id) {
+			glDeleteTextures(1, &id);
+		}
+	}
+
+	texture_t(texture_t&& another) noexcept {
+		*this = std::move(another);
+	}
+
+	texture_t& operator = (texture_t&& another) noexcept {
+		if (this != &another) {
+			id = std::exchange(another.id, 0);
+			width = std::exchange(another.width, 0);
+			height = std::exchange(another.height, 0);
+		} return *this;
+	}
+
+	GLuint id{};
+	int width{};
+	int height{};
+};
+
+texture_t create_test_texture(int width, int height) {
+	assert(width > 0);
+	assert(height > 0);
+
+	constexpr int channels = 2;
+
+	std::vector<float> tex_data(width * height * channels);
+	for (int i = 0; i < height; i++) {
+		for (int j = 0; j < width; j++) {
+			int base = i * width * channels + j * channels;
+			tex_data[base    ] = (float)j / width;
+			tex_data[base + 1] = (float)i / height;
+		}
+	}
+
+	texture_t tex{(GLuint)0, width, height};
+	glCreateTextures(GL_TEXTURE_2D, 1, &tex.id);
+	if (tex.id == 0) {
+		return texture_t{};
+	}
+	glTextureParameteri(tex.id, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTextureParameteri(tex.id, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTextureParameteri(tex.id, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTextureParameteri(tex.id, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glTextureStorage2D(tex.id, 1, GL_RG32F, width, height);
+	glTextureSubImage2D(tex.id, 0, 0, 0, width, height, GL_RG, GL_FLOAT, tex_data.data());
+	return tex;
+}
 
 int main() {
 	glfw::guard_t glfw_guard;
@@ -114,9 +189,19 @@ int main() {
 
 	bool show_demo_window = true;
 	{
+		constexpr int tex_width = 256;
+		constexpr int tex_height = 256;
+
 		glew_guard_t glew_guard;
-		demo_window_t demo;
-		sim_gui_t sim;
+		demo_widget_t demo;
+		sim_widget_t sim;
+		framebuffer_widget_t framebuffer_widget;
+
+		texture_t tex = create_test_texture(tex_width, tex_height);
+		if (tex.id == 0) {
+			return -1;
+		}
+
 		while (!window.should_close()) {
 			glfw::poll_events();
 
@@ -128,7 +213,8 @@ int main() {
 			ImGui::NewFrame();
 
 			//demo.render();
-			sim.render();
+			//sim.render();
+			framebuffer_widget.render((ImTextureID)tex.id, tex.width, tex.height);
 
 			ImGui::Render();
 			auto [w, h] = window.get_framebuffer_size();
