@@ -1,5 +1,7 @@
 #pragma once
 
+#include <string>
+#include <vector>
 #include <cassert>
 #include <utility>
 #include <functional>
@@ -52,6 +54,58 @@ namespace glfw {
 	inline const input_key_t mouse_v[] = {MouseButtonLeft, MouseButtonRight, MouseButtonMiddle};
 
 	// window
+	struct int_hint_t {
+		int hint{};
+		int vlaue{};
+	};
+
+	class window_params_t {
+	public:
+		static window_params_t create_basic_opengl(std::string title, int width, int height, int major, int minor);
+
+	public:
+		inline window_params_t(std::string _title, int _width, int _height)
+			: title(std::move(title)), width{_width}, height{_height} {}
+
+		inline void set_hint(int hint, int value) {
+			hints.push_back({hint, value});
+		}
+
+		inline void set_title(std::string value) {
+			title = std::move(value);
+		}
+
+		inline void set_width(int value) {
+			width = value;
+		}
+
+		inline void set_height(int value) {
+			height = value;
+		}
+
+		inline const std::vector<int_hint_t>& get_hints() const {
+			return hints;
+		}
+
+		inline const std::string& get_title() const {
+			return title;
+		}
+
+		inline int get_width() const {
+			return width;
+		}
+
+		inline int get_height() const {
+			return height;
+		}
+
+	private:
+		std::vector<int_hint_t> hints;
+		std::string title;
+		int width{};
+		int height{};
+	};
+
 	struct exts_t {
 		int width{};
 		int height{};
@@ -161,7 +215,7 @@ namespace glfw {
 		void set_usr_ptr(void* usr_ptr);
 		
 	public:
-		window_t(int w, int h);
+		window_t(const window_params_t& params);
 		~window_t();
 
 		void make_ctx_current();

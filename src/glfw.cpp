@@ -28,6 +28,16 @@ namespace glfw {
 	}
 
 
+	window_params_t window_params_t::create_basic_opengl(std::string title, int width, int height, int major, int minor) {
+		window_params_t params(std::move(title), width, height);
+		params.set_hint(GLFW_DOUBLEBUFFER, GLFW_TRUE);
+		params.set_hint(GLFW_CENTER_CURSOR, GLFW_TRUE);
+		params.set_hint(GLFW_CLIENT_API, GLFW_OPENGL_API);
+		params.set_hint(GLFW_CONTEXT_VERSION_MAJOR, major);
+		params.set_hint(GLFW_CONTEXT_VERSION_MINOR, minor);
+		return params;
+	}
+
 	void window_t::key_cb(GLFWwindow* window, int key, int scancode, int action, int mods) {
 		window_t* wnd = (window_t*)glfwGetWindowUserPointer(window);
 		if (wnd->key_ev_handler) {
@@ -127,14 +137,11 @@ namespace glfw {
 	}
 
 
-	window_t::window_t(int w, int h) {
-		glfwWindowHint(GLFW_DOUBLEBUFFER, GLFW_TRUE);
-		glfwWindowHint(GLFW_CENTER_CURSOR, GLFW_TRUE);
-		glfwWindowHint(GLFW_CLIENT_API, GLFW_OPENGL_API);
-		glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
-		glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 6);
-
-		window = glfwCreateWindow(w, h, "LSDetris", nullptr, nullptr);
+	window_t::window_t(const window_params_t& params) {
+		for (auto [hint, value] : params.get_hints()) {
+			glfwWindowHint(hint, value);
+		}
+		window = glfwCreateWindow(params.get_width(), params.get_height(), params.get_title().c_str(), nullptr, nullptr);
 		if (!window) {
 			throw std::runtime_error("Failed to create window");
 		}

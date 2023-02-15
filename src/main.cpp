@@ -100,7 +100,7 @@ struct sim_gui_t {
 
 int main() {
 	glfw::guard_t glfw_guard;
-	glfw::window_t window(800, 400);
+	glfw::window_t window(glfw::window_params_t::create_basic_opengl("yin-yang", 1280, 720, 4, 6));
 
 	window.make_ctx_current();
 
