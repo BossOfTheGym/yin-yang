@@ -391,8 +391,103 @@ namespace {
 		return frame;
 	}
 
+	struct uniform_t {
+		static constexpr int total_props = 4;
+		static constexpr const GLenum all_props[] = {GL_BLOCK_INDEX, GL_TYPE, GL_NAME_LENGTH, GL_LOCATION};
+
+		static uniform_t from_props(const GLint props[total_props]) {
+			return uniform_t{
+				.block_index = props[0], .type = props[1], .name_length = props[2], .location = props[3],
+			};
+		}
+
+		static GLint get_props_block_index(const GLint props[total_props]) {
+			return props[0];
+		}
+
+		GLint block_index{};
+		GLint type{};
+		GLint name_length{};
+		GLint location{};
+	};
+
 	struct shader_program_t {
-		// TODO
+		template<class ... shader_t>
+		static shader_program_t create(shader_t&& ... shaders) {
+			// TODO
+			return {};
+		}
+
+		shader_program_t(GLuint _id = 0) : id{_id} {
+			GLint active_uniforms{}, uniform_max_name_length{};
+			glGetProgramInterfaceiv(id, GL_UNIFORM, GL_ACTIVE_RESOURCES, &active_uniforms);
+			glGetProgramInterfaceiv(id, GL_UNIFORM, GL_MAX_NAME_LENGTH, &uniform_max_name_length);
+
+			auto name_buffer = std::make_unique<char[]>(uniform_max_name_length);
+			for (GLuint i = 0; i < active_uniforms; i++) {
+				GLint props[uniform_t::total_props];
+				glGetProgramResourceiv(id, GL_UNIFORM, i,
+							uniform_t::total_props, uniform_t::all_props, uniform_t::total_props, nullptr, props);
+				if (uniform_t::get_props_block_index(props) != -1) {
+					continue;
+				}
+
+				glGetProgramResourceName(id, GL_UNIFORM, i, uniform_max_name_length, nullptr, name_buffer.get());
+				uniforms[std::string(name_buffer.get())] = uniform_t::from_props(props);
+			}
+		}
+
+		shader_program_t(shader_program_t&& another) noexcept {
+			*this = std::move(another);
+		}
+
+		~shader_program_t() {
+			if (id) {
+				glDeleteProgram(id);
+			}
+		}
+
+		shader_program_t& operator = (shader_program_t&& another) noexcept {
+			if (this != &another) {
+				std::swap(id, another.id);
+				std::swap(uniforms, another.uniforms);
+			} return *this;
+		}
+
+		bool set_mat3(const char* name, const glm::mat3& value) const {
+			if (auto it = uniforms.find(name); it != uniforms.end()) {
+				assert(it->second.type == GL_FLOAT_MAT3);
+				glProgramUniformMatrix3fv(id, it->second.location, 1, GL_FALSE, glm::value_ptr(value));
+				return true;
+			} return false;
+		}
+
+		bool set_mat4(const char* name, const glm::mat4& value) const {
+			if (auto it = uniforms.find(name); it != uniforms.end()) {
+				assert(it->second.type == GL_FLOAT_MAT4);
+				glProgramUniformMatrix4fv(id, it->second.location, 1, GL_FALSE, glm::value_ptr(value));
+				return true;
+			} return false;
+		}
+
+		bool set_vec3(const char* name, const glm::vec3& value) const {
+			if (auto it = uniforms.find(name); it != uniforms.end()) {
+				assert(it->second.type == GL_FLOAT_VEC3);
+				glProgramUniform3fv(id, it->second.location, 1, glm::value_ptr(value));
+				return true;
+			} return false;
+		}
+
+		bool set_vec4(const char* name, const glm::vec4& value) const {
+			if (auto it = uniforms.find(name); it != uniforms.end()) {
+				assert(it->second.type == GL_FLOAT_VEC4);
+				glProgramUniform4fv(id, it->second.location, 1, glm::value_ptr(value));
+				return true;
+			} return false;
+		}
+
+		GLuint id{};
+		std::unordered_map<std::string, uniform_t> uniforms;
 	};
 
 	// TODO : basic mesh shader + basic light
