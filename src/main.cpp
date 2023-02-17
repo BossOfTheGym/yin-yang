@@ -36,6 +36,8 @@
 
 #include <GL/glew.h>
 
+using namespace std::literals::string_literals;
+
 namespace {
 	struct glew_guard_t {
 		glew_guard_t() {
@@ -123,7 +125,7 @@ namespace {
 		texture_t(GLuint _id, int _width, int _height) : id{_id}, width{_width}, height{_height} {}
 
 		~texture_t() {
-			if (id) {
+			if (id != 0) {
 				glDeleteTextures(1, &id);
 			}
 		}
@@ -308,7 +310,7 @@ namespace {
 		}
 
 		~vao_t() {
-			if (id) {
+			if (id != 0) {
 				glDeleteVertexArrays(1, &id);
 			}
 		}
@@ -353,13 +355,19 @@ namespace {
 	};
 
 	struct framebuffer_t {
+		static framebuffer_t create() {
+			framebuffer_t frame{};
+			glCreateFramebuffers(1, &frame.id);
+			return frame;
+		}
+
 		framebuffer_t() = default;
 		framebuffer_t(framebuffer_t&& another) noexcept {
 			*this = std::move(another);
 		}
 
 		~framebuffer_t() {
-			if (id) {
+			if (id != 0) {
 				glDeleteFramebuffers(1, &id);	
 			}
 		}
@@ -385,11 +393,61 @@ namespace {
 		GLuint id{};
 	};
 
-	framebuffer_t create_framebuffer() {
-		framebuffer_t frame{};
-		glCreateFramebuffers(1, &frame.id);
-		return frame;
-	}
+	struct shader_t {
+		static shader_t create(const std::string& source, GLenum type) {
+			const GLchar* src = source.data();
+			GLint size = source.size();
+
+			shader_t shader{};
+			shader.id = glCreateShader(type);
+			shader.type = type;
+			glShaderSource(shader.id, 1, &src, &size);
+			glCompileShader(shader.id);
+			return shader;
+		}
+
+		shader_t() = default;
+		shader_t(shader_t&& another) noexcept {
+			*this = std::move(another);
+		}
+
+		~shader_t() {
+			if (id != 0) {
+				glDeleteShader(id);
+			}
+		}
+
+		shader_t& operator = (shader_t&& another) noexcept {
+			if (this != &another) {
+				std::swap(id, another.id);
+			} return *this;
+		}
+
+		bool valid() const {
+			return id != 0;
+		}
+
+		bool compiled() const {
+			GLint status;
+			glGetShaderiv(id, GL_COMPILE_STATUS, &status);
+			return status == GL_TRUE;
+		}
+
+		std::string get_info_log() const {
+			int log_length = {};
+			glGetShaderiv(id, GL_INFO_LOG_LENGTH, &log_length);
+
+			GLsizei length{};
+			std::string info_log(log_length, '\0');
+			glGetShaderInfoLog(id, log_length, &length, info_log.data());
+			info_log.resize(length); // cut unneccessary null-terminator
+			assert(length + 1 == log_length);
+			return info_log;
+		}
+
+		GLuint id{};
+		GLenum type{};
+	};
 
 	struct uniform_t {
 		static constexpr int total_props = 4;
@@ -413,9 +471,13 @@ namespace {
 
 	struct shader_program_t {
 		template<class ... shader_t>
-		static shader_program_t create(shader_t&& ... shaders) {
-			// TODO
-			return {};
+		static shader_program_t create(shader_t&& ... shader) {
+			shader_program_t program; 
+			program.id = glCreateProgram();
+			(glAttachShader(program.id, shader.id), ...);
+			glLinkProgram(program.id);
+			(glDetachShader(program.id, shader.id), ...);
+			return program;
 		}
 
 		shader_program_t(GLuint _id = 0) : id{_id} {
@@ -423,7 +485,7 @@ namespace {
 			glGetProgramInterfaceiv(id, GL_UNIFORM, GL_ACTIVE_RESOURCES, &active_uniforms);
 			glGetProgramInterfaceiv(id, GL_UNIFORM, GL_MAX_NAME_LENGTH, &uniform_max_name_length);
 
-			auto name_buffer = std::make_unique<char[]>(uniform_max_name_length);
+			std::string name(uniform_max_name_length, '\0');
 			for (GLuint i = 0; i < active_uniforms; i++) {
 				GLint props[uniform_t::total_props];
 				glGetProgramResourceiv(id, GL_UNIFORM, i,
@@ -432,8 +494,11 @@ namespace {
 					continue;
 				}
 
-				glGetProgramResourceName(id, GL_UNIFORM, i, uniform_max_name_length, nullptr, name_buffer.get());
-				uniforms[std::string(name_buffer.get())] = uniform_t::from_props(props);
+				GLsizei name_length; 
+				glGetProgramResourceName(id, GL_UNIFORM, i, uniform_max_name_length, &name_length, name.data());
+				name.resize(name_length); // cut unneccessary null-terminator
+
+				uniforms[name] = uniform_t::from_props(props);
 			}
 		}
 
@@ -486,11 +551,109 @@ namespace {
 			} return false;
 		}
 
+		bool valid() const {
+			return id != 0;
+		}
+
+		bool linked() const {
+			GLint status;
+			glGetProgramiv(id, GL_LINK_STATUS, &status);
+			return status == GL_TRUE;
+		}
+
+		std::string get_info_log() const {
+			int log_length = {};
+			glGetProgramiv(id, GL_INFO_LOG_LENGTH, &log_length);
+
+			GLsizei length = {};
+			std::string info_log(log_length, '\0');
+			glGetProgramInfoLog(id, log_length, &length, info_log.data());
+			info_log.resize(length); // cut unneccessary null-terminator
+			assert(length + 1 == log_length);
+			return info_log;
+		}
+
 		GLuint id{};
 		std::unordered_map<std::string, uniform_t> uniforms;
 	};
 
-	// TODO : basic mesh shader + basic light
+	const inline std::string basic_vert_source =
+R"(
+#version 460 core
+layout(location = 0) in vec3 attr_pos;
+
+uniform mat4 u_m;
+uniform mat4 u_v;
+uniform mat4 u_p;
+
+out vec3 world_pos;
+
+void main() {
+	vec4 pos = u_m * vec4(attr_pos, 1.0);
+	world_pos = pos.xyz;
+	gl_Position = u_p * u_v * pos;
+}
+)";
+
+	const inline std::string basic_frag_source =
+R"(
+#version 460 core
+layout(location = 0) out vec4 color;
+
+in vec3 world_pos;
+
+uniform vec3 u_diffuse_color;
+uniform float u_shininess;
+
+uniform vec3 u_ambient_color;
+uniform vec3 u_light_color;
+uniform vec3 u_light_pos;
+
+uniform vec3 u_eye_pos;
+
+void main() {
+	vec3 v0 = dFdxFine(world_pos);
+	vec3 v1 = dFdyFine(world_pos);
+	vec3 normal = normalize(cross(v0, v1));
+
+	vec3 ambient_color = u_ambient_color;
+
+	vec3 light_ray = normalize(u_light_pos - world_pos);
+	vec3 light_reflected = reflect(light_ray, normal);
+	float diffuse_coef = clamp(dot(light_ray, light_reflected), 0.0, 1.0);
+	vec3 diffuse_color = diffuse_coef * u_diffuse_color;
+
+	vec3 look_ray = normalize(u_eye_pos - world_pos);
+	float specular_coef = pow(clamp(dot(look_ray, light_reflected), 0.0, 1.0), u_shininess);
+	vec3 specular_color = vec3(0.0);
+	if (specular_coef > 0.0) {
+		specular_color = specular_coef * u_light_color;
+		diffuse_color *= (1.0 - specular_coef);
+	}
+
+	color = vec4(ambient_color + diffuse_color + specular_color, 1.0);
+}
+)";
+
+	std::tuple<shader_program_t, std::string> gen_basic_shader_program() {
+		std::ostringstream out;
+
+		shader_t vert = shader_t::create(basic_vert_source, GL_VERTEX_SHADER);
+		if (!vert.compiled()) {
+			out << "*** Failed to compile vert shader:\n" << vert.get_info_log() << "\n";
+		}
+
+		shader_t frag = shader_t::create(basic_frag_source, GL_FRAGMENT_SHADER);
+		if (!frag.compiled()) {
+			out << "*** Failed to compile frag shader:\n" << frag.get_info_log() << "\n";
+		}
+
+		shader_program_t program = shader_program_t::create(vert, frag);
+		if (!program.linked()) {
+			out << "*** Failed to link program:\n" << program.get_info_log() << "\n";
+			program = shader_program_t{};
+		} return std::make_tuple(std::move(program), out.str());
+	}
 }
 
 int main() {
@@ -519,6 +682,12 @@ int main() {
 
 		texture_t tex = gen_test_texture(tex_width, tex_height);
 		if (tex.id == 0) {
+			return -1;
+		}
+
+		auto [program, info_log] = gen_basic_shader_program();
+		if (!program.valid()) {
+			std::cerr << info_log << std::endl;
 			return -1;
 		}
 
