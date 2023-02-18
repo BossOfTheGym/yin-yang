@@ -122,8 +122,6 @@ namespace {
 
 	struct texture_t {
 		texture_t() = default;
-		texture_t(GLuint _id, int _width, int _height) : id{_id}, width{_width}, height{_height} {}
-
 		~texture_t() {
 			if (id != 0) {
 				glDeleteTextures(1, &id);
@@ -140,6 +138,10 @@ namespace {
 				std::swap(width, another.width);
 				std::swap(height, another.height);
 			} return *this;
+		}
+
+		void bind_unit(GLuint unit) const {
+			glBindTextureUnit(unit, id);
 		}
 
 		GLuint id{};
@@ -162,7 +164,9 @@ namespace {
 			}
 		}
 
-		texture_t tex{(GLuint)0, width, height};
+		texture_t tex{};
+		tex.width = width;
+		tex.height = height;
 		glCreateTextures(GL_TEXTURE_2D, 1, &tex.id);
 		glTextureParameteri(tex.id, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
 		glTextureParameteri(tex.id, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -170,6 +174,29 @@ namespace {
 		glTextureParameteri(tex.id, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 		glTextureStorage2D(tex.id, 1, GL_RG32F, width, height);
 		glTextureSubImage2D(tex.id, 0, 0, 0, width, height, GL_RG, GL_FLOAT, tex_data.data());
+		return tex;
+	}
+
+	enum depth_texture_type_t : GLenum {
+		Depth16 = GL_DEPTH_COMPONENT16,
+		Depth24 = GL_DEPTH_COMPONENT24,
+		Depth32 = GL_DEPTH_COMPONENT32,
+		Depth32F = GL_DEPTH_COMPONENT32F,
+	};
+
+	texture_t gen_depth_texture(int width, int height, depth_texture_type_t type) {
+		assert(width > 0);
+		assert(height > 0);
+
+		texture_t tex{};
+		tex.width = width;
+		tex.height = height;
+		glCreateTextures(GL_TEXTURE_2D, 1, &tex.id);
+		glTextureParameteri(tex.id, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+		glTextureParameteri(tex.id, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		glTextureParameteri(tex.id, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTextureParameteri(tex.id, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		glTextureStorage2D(tex.id, 1, type, width, height);
 		return tex;
 	}
 
@@ -303,19 +330,28 @@ namespace {
 		return mesh;
 	}
 
-	struct vao_t {
-		vao_t() = default;
-		vao_t(vao_t&& another) noexcept {
+	enum vertex_array_mode_t : GLenum {
+		Triangles = GL_TRIANGLES,
+	};
+
+	struct vertex_array_t {
+		static vertex_array_t create_dummy() {
+			// TODO
+			return {};
+		}
+
+		vertex_array_t() = default;
+		vertex_array_t(vertex_array_t&& another) noexcept {
 			*this = std::move(another);
 		}
 
-		~vao_t() {
+		~vertex_array_t() {
 			if (id != 0) {
 				glDeleteVertexArrays(1, &id);
 			}
 		}
 
-		vao_t& operator = (vao_t&& another) noexcept {
+		vertex_array_t& operator = (vertex_array_t&& another) noexcept {
 			if (this != &another) {
 				std::swap(id, another.id);
 				std::swap(mode, another.mode);
@@ -323,13 +359,17 @@ namespace {
 			} return *this;
 		}
 
+		void bind() const {
+			glBindVertexArray(id);
+		}
+
 		GLuint id{};
 		GLenum mode{};
 		int count{};
 	};
 
-	vao_t gen_vao_from_mesh(const mesh_t& mesh) {
-		vao_t vao{};
+	vertex_array_t gen_vertex_array_from_mesh(const mesh_t& mesh) {
+		vertex_array_t vao{};
 
 		int bind_index = 0;
 		glCreateVertexArrays(1, &vao.id);
@@ -347,9 +387,13 @@ namespace {
 		return vao;
 	}
 
-	struct fbo_attachment_t {
-		GLenum attachment{};
-		GLenum tex_target{};
+	enum framebuffer_attachment_type_t : GLenum {
+		Color0 = GL_COLOR_ATTACHMENT0,
+		Depth = GL_DEPTH_ATTACHMENT,
+	};
+
+	struct framebuffer_attachment_t {
+		GLenum type{};
 		GLuint texture{};
 		GLint level{};
 	};
@@ -378,16 +422,28 @@ namespace {
 			} return *this;
 		}
 
-		void attach(const fbo_attachment_t& attachment) {
-			glNamedFramebufferTexture(id, attachment.attachment, attachment.texture, attachment.level);
+		void attach(const framebuffer_attachment_t& attachment) {
+			glNamedFramebufferTexture(id, attachment.type, attachment.texture, attachment.level);
 		}
 
-		void detach(const fbo_attachment_t& attachment) {
-			glNamedFramebufferTexture(id, attachment.attachment, 0, attachment.level);
+		void detach(const framebuffer_attachment_t& attachment) {
+			glNamedFramebufferTexture(id, attachment.type, 0, attachment.level);
 		}
 
 		bool get_complete_status(GLenum target) {
 			return glCheckNamedFramebufferStatus(id, target) == GL_FRAMEBUFFER_COMPLETE;
+		}
+
+		void set_draw_buffers(GLsizei count, const GLenum *buffers) {
+			glNamedFramebufferDrawBuffers(id, count, buffers);
+		}
+
+		void bind() const {
+			glBindFramebuffer(GL_FRAMEBUFFER, id);
+		}
+
+		bool valid() const {
+			return id != 0;
 		}
 
 		GLuint id{};
@@ -449,58 +505,90 @@ namespace {
 		GLenum type{};
 	};
 
-	struct uniform_t {
+	struct uniform_props_t {
 		static constexpr int total_props = 4;
 		static constexpr const GLenum all_props[] = {GL_BLOCK_INDEX, GL_TYPE, GL_NAME_LENGTH, GL_LOCATION};
 
-		static uniform_t from_props(const GLint props[total_props]) {
-			return uniform_t{
-				.block_index = props[0], .type = props[1], .name_length = props[2], .location = props[3],
+		static uniform_props_t from_array(const std::string& name, const GLint props[total_props]) {
+			return uniform_props_t{
+				.name = name, .block_index = props[0], .type = props[1], .name_length = props[2], .location = props[3],
 			};
 		}
 
-		static GLint get_props_block_index(const GLint props[total_props]) {
+		static GLint get_array_block_index(const GLint props[total_props]) {
 			return props[0];
 		}
 
+		std::string name{};
 		GLint block_index{};
 		GLint type{};
 		GLint name_length{};
 		GLint location{};
 	};
 
-	struct shader_program_t {
-		template<class ... shader_t>
-		static shader_program_t create(shader_t&& ... shader) {
-			shader_program_t program; 
-			program.id = glCreateProgram();
-			(glAttachShader(program.id, shader.id), ...);
-			glLinkProgram(program.id);
-			(glDetachShader(program.id, shader.id), ...);
-			return program;
+	const char* uniform_type_to_str(GLint type) {
+		switch (type) {
+			case GL_FLOAT: return "float";
+			case GL_INT: return "int";
+			case GL_FLOAT_VEC3: return "vec3";
+			case GL_FLOAT_VEC4: return "vec4";
+			case GL_FLOAT_MAT3: return "mat3";
+			case GL_FLOAT_MAT4: return "mat4";
+			default: return "unknown"; 
 		}
+	}
 
-		shader_program_t(GLuint _id = 0) : id{_id} {
+	std::ostream& operator << (std::ostream& os, const uniform_props_t& props) {
+		os << "name: " << props.name
+			<< " block_index: " << props.block_index
+			<< " type: " << uniform_type_to_str(props.type)
+			<< " name_length: " << props.name_length
+			<< " location: " << props.location << std::endl;
+		return os;
+	}
+
+	struct shader_program_t {
+		using uniform_props_map_t = std::unordered_map<std::string, uniform_props_t>;
+
+		static uniform_props_map_t get_uniform_props_map(GLuint id) {
+			uniform_props_map_t uniforms;
+
 			GLint active_uniforms{}, uniform_max_name_length{};
 			glGetProgramInterfaceiv(id, GL_UNIFORM, GL_ACTIVE_RESOURCES, &active_uniforms);
 			glGetProgramInterfaceiv(id, GL_UNIFORM, GL_MAX_NAME_LENGTH, &uniform_max_name_length);
 
-			std::string name(uniform_max_name_length, '\0');
+			std::string name;
 			for (GLuint i = 0; i < active_uniforms; i++) {
-				GLint props[uniform_t::total_props];
+				GLint props[uniform_props_t::total_props];
 				glGetProgramResourceiv(id, GL_UNIFORM, i,
-							uniform_t::total_props, uniform_t::all_props, uniform_t::total_props, nullptr, props);
-				if (uniform_t::get_props_block_index(props) != -1) {
+							uniform_props_t::total_props, uniform_props_t::all_props, uniform_props_t::total_props, nullptr, props);
+				if (uniform_props_t::get_array_block_index(props) != -1) {
 					continue;
 				}
 
-				GLsizei name_length; 
+				GLsizei name_length;
+				name.resize(uniform_max_name_length, '\0');
 				glGetProgramResourceName(id, GL_UNIFORM, i, uniform_max_name_length, &name_length, name.data());
 				name.resize(name_length); // cut unneccessary null-terminator
 
-				uniforms[name] = uniform_t::from_props(props);
-			}
+				uniforms[name] = uniform_props_t::from_array(name, props);
+			} return uniforms;
 		}
+
+		template<class ... shader_t>
+		static shader_program_t create(shader_t&& ... shader) {
+			shader_program_t program;{} 
+			program.id = glCreateProgram();
+			(glAttachShader(program.id, shader.id), ...);
+			glLinkProgram(program.id);
+			(glDetachShader(program.id, shader.id), ...);
+
+			if (program.linked()) {
+				program.uniforms = get_uniform_props_map(program.id);
+			} return program;
+		}
+
+		shader_program_t() = default;
 
 		shader_program_t(shader_program_t&& another) noexcept {
 			*this = std::move(another);
@@ -517,6 +605,24 @@ namespace {
 				std::swap(id, another.id);
 				std::swap(uniforms, another.uniforms);
 			} return *this;
+		}
+
+		void use() const {
+			glUseProgram(id);
+		}
+
+		bool set_float(const char* name, GLfloat value) const {
+			if (auto it = uniforms.find(name); it != uniforms.end()) {
+				assert(it->second.type == GL_FLOAT);
+				glProgramUniform1f(id, it->second.location, value);
+			} return false;
+		}
+
+		bool set_int(const char* name, GLint value) const {
+			if (auto it = uniforms.find(name); it != uniforms.end()) {
+				assert(it->second.type == GL_INT);
+				glProgramUniform1i(id, it->second.location, value);
+			} return false;
 		}
 
 		bool set_mat3(const char* name, const glm::mat3& value) const {
@@ -574,7 +680,7 @@ namespace {
 		}
 
 		GLuint id{};
-		std::unordered_map<std::string, uniform_t> uniforms;
+		std::unordered_map<std::string, uniform_props_t> uniforms;
 	};
 
 	const inline std::string basic_vert_source =
@@ -654,6 +760,97 @@ void main() {
 			program = shader_program_t{};
 		} return std::make_tuple(std::move(program), out.str());
 	}
+
+	using shader_program_setup_t = std::function<void(shader_program_t& program)>;
+	using vertex_array_drawer_t = std::function<void(vertex_array_t& vao)>;
+
+	using empty_drawer_t = decltype([] (vertex_array_t&) {});
+	using empty_setup_t = decltype([] (shader_program_t&) {});
+
+	// general_setup: some common setups, so there is no need it for each draw command
+	// vao_setups: some sutps specific for each vao draw command
+	// vao_drawers: draw command, how to draw each vao
+	struct basic_render_seq_t {
+		basic_render_seq_t(std::shared_ptr<shader_program_t> _program) : program{std::move(_program)} {
+			assert(program && program->valid());
+		}
+
+		template<class setup_t>
+		void set_general_setup(setup_t&& setup) {
+			general_setup = std::forward<setup_t>(setup);
+		}
+
+		template<class setup_t, class drawer_t>
+		void add_draw_command(std::shared_ptr<vertex_array_t> vao, setup_t&& setup, drawer_t&& drawer) {
+			vaos.push_back(std::move(vao));
+			vao_setups.push_back(std::forward<setup_t>(setup));
+			vao_drawers.push_back(std::forward<drawer_t>(drawer));
+		}
+
+		void draw() {
+			program->use();
+			if (general_setup) {
+				general_setup(*program);
+			}
+
+			GLuint prev_vao_id = 0;
+			for (int i = 0; i < vaos.size(); i++) {
+				if (vaos[i]->id != prev_vao_id) {
+					vaos[i]->bind();
+				} if (vao_setups[i]) {
+					vao_setups[i](*program);
+				} vao_drawers[i](*vaos[i]);
+			}
+		}
+
+		std::shared_ptr<shader_program_t> program;
+		shader_program_setup_t general_setup;
+		std::vector<std::shared_ptr<vertex_array_t>> vaos;
+		std::vector<shader_program_setup_t> vao_setups;
+		std::vector<vertex_array_drawer_t> vao_drawers;
+	};
+
+	using pass_setup_t = std::function<void(framebuffer_t&)>;
+	using pass_action_t = pass_setup_t;
+
+	struct basic_pass_t {
+		basic_pass_t() : fbo{framebuffer_t::create()} {}
+
+		template<class setup_t>
+		void add_setup(setup_t&& setup) {
+			setups.push_back(std::forward<setup_t>(setup));
+		}
+
+		template<class action_t>
+		void execute_action(action_t&& action) {
+			for (auto& setup : setups) {
+				setup(fbo);
+				action(fbo);
+			}
+		}
+
+		framebuffer_t fbo;
+		std::vector<pass_setup_t> setups;
+	};
+
+	// TODO : basic physics
+	// TOOD : sphere shape
+	// TODO : force application
+	// TODO : collision handling
+
+	// TODO : advanced drawing
+	// TODO : G-buffer
+	// TODO : create depth texture
+	// TODO : create color texture
+	// TODO : create normal texture
+	// TODO : create pos texture
+	// TODO : instanced drawing
+	// TODO : create first pass : draw everything into the G-buffer
+	// TODO : create second pass : apply light
+
+	// TODO : advanced physics
+	// TODO : grid update method
+	// TODO : multithreaded update
 }
 
 int main() {
@@ -672,7 +869,7 @@ int main() {
 
 	bool show_demo_window = true;
 	{
-		constexpr int tex_width = 256;
+		constexpr int tex_width = 512;
 		constexpr int tex_height = 256;
 
 		glew_guard_t glew_guard;
@@ -690,6 +887,35 @@ int main() {
 			std::cerr << info_log << std::endl;
 			return -1;
 		}
+
+		for (auto& [name, props] : program.uniforms) {
+			std::cout << props << std::endl;
+		}
+
+		mesh_t sphere = gen_sphere_mesh();
+		vertex_array_t sphere_vao = gen_vertex_array_from_mesh(sphere);
+
+		basic_pass_t pass;
+		pass.add_setup([&] (framebuffer_t&) {
+			std::cout << "Hello from pass setup!" << std::endl;
+		});
+
+		basic_render_seq_t render_seq(std::make_shared<shader_program_t>(std::move(program)));
+		render_seq.set_general_setup([&] (shader_program_t& program) {
+			std::cout << "Hello from render_seq general setup!" << std::endl;
+		});
+		render_seq.add_draw_command(std::make_shared<vertex_array_t>(std::move(sphere_vao)),
+			[&] (shader_program_t&) {
+				std::cout << "Hello from vao_setup!" << std::endl;
+			},
+			[&] (vertex_array_t&) {
+				std::cout << "Hello from vao_drawer!" << std::endl;
+			}
+		);
+
+		pass.execute_action([&] (framebuffer_t& fbo) {
+			render_seq.draw();
+		});
 
 		while (!window.should_close()) {
 			glfw::poll_events();
