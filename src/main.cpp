@@ -112,7 +112,12 @@ namespace {
 			}
 
 			if (ImGui::Begin("Framebuffer", &opened, flags)) {
-				ImGui::Image(id, ImVec2(width, height));
+				// workaround to flip texture
+				ImVec2 pos = ImGui::GetCursorPos();
+				pos.x += 0;
+				pos.y += height;
+				ImGui::SetCursorPos(pos);
+				ImGui::Image(id, ImVec2(width, -height));
 			} ImGui::End();
 		}
 
@@ -123,7 +128,7 @@ namespace {
 	struct texture_t {
 		texture_t() = default;
 		~texture_t() {
-			if (id != 0) {
+			if (valid()) {
 				glDeleteTextures(1, &id);
 			}
 		}
@@ -142,6 +147,10 @@ namespace {
 
 		void bind_unit(GLuint unit) const {
 			glBindTextureUnit(unit, id);
+		}
+
+		bool valid() const {
+			return id != 0;
 		}
 
 		GLuint id{};
@@ -177,11 +186,31 @@ namespace {
 		return tex;
 	}
 
+	enum texture_internal_format_t : GLenum {
+		Rgba32f = GL_RGBA32F,
+	};
+
+	texture_t gen_empty_texture(int width, int height, texture_internal_format_t format) {
+		assert(width > 0);
+		assert(height > 0);
+
+		texture_t tex{};
+		tex.width = width;
+		tex.height = height;
+		glCreateTextures(GL_TEXTURE_2D, 1, &tex.id);
+		glTextureParameteri(tex.id, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTextureParameteri(tex.id, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glTextureParameteri(tex.id, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTextureParameteri(tex.id, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		glTextureStorage2D(tex.id, 1, format, width, height);
+		return tex;
+	}
+
 	enum depth_texture_type_t : GLenum {
 		Depth16 = GL_DEPTH_COMPONENT16,
 		Depth24 = GL_DEPTH_COMPONENT24,
 		Depth32 = GL_DEPTH_COMPONENT32,
-		Depth32F = GL_DEPTH_COMPONENT32F,
+		Depth32f = GL_DEPTH_COMPONENT32F,
 	};
 
 	texture_t gen_depth_texture(int width, int height, depth_texture_type_t type) {
@@ -230,7 +259,7 @@ namespace {
 		}
 
 		~mesh_t() {
-			if (id != 0) {
+			if (valid()) {
 				glDeleteBuffers(1, &id);
 			}
 		}
@@ -244,6 +273,10 @@ namespace {
 				std::swap(faces, another.faces);
 				std::swap(vertices, another.vertices);
 			} return *this;
+		}
+
+		bool valid() const {
+			return id != 0;
 		}
 
 		GLuint id{}; // for now only one buffer per mesh 
@@ -277,42 +310,43 @@ namespace {
 
 		glm::vec3 icosahedron[ico_vertices] = {
 			sphere_to_cartesian(glm::vec3(1.0, 0.0, 0.0)), // north pole
-			sphere_to_cartesian(glm::vec3(1.0, north_the, 0.0 * pi / 5.0)),
-			sphere_to_cartesian(glm::vec3(1.0, north_the, 1.0 * pi / 5.0)),
-			sphere_to_cartesian(glm::vec3(1.0, north_the, 2.0 * pi / 5.0)),
-			sphere_to_cartesian(glm::vec3(1.0, north_the, 3.0 * pi / 5.0)),
-			sphere_to_cartesian(glm::vec3(1.0, north_the, 4.0 * pi / 5.0)),
-			sphere_to_cartesian(glm::vec3(1.0, south_the, 0.0 * pi / 5.0 + pi / 10.0)),
-			sphere_to_cartesian(glm::vec3(1.0, south_the, 1.0 * pi / 5.0 + pi / 10.0)),
-			sphere_to_cartesian(glm::vec3(1.0, south_the, 2.0 * pi / 5.0 + pi / 10.0)),
-			sphere_to_cartesian(glm::vec3(1.0, south_the, 3.0 * pi / 5.0 + pi / 10.0)),
-			sphere_to_cartesian(glm::vec3(1.0, south_the, 4.0 * pi / 5.0 + pi / 10.0)),
+			sphere_to_cartesian(glm::vec3(1.0, north_the, 0.0 * 2.0 * pi / 5.0)),
+			sphere_to_cartesian(glm::vec3(1.0, north_the, 1.0 * 2.0 * pi / 5.0)),
+			sphere_to_cartesian(glm::vec3(1.0, north_the, 2.0 * 2.0 * pi / 5.0)),
+			sphere_to_cartesian(glm::vec3(1.0, north_the, 3.0 * 2.0 * pi / 5.0)),
+			sphere_to_cartesian(glm::vec3(1.0, north_the, 4.0 * 2.0 * pi / 5.0)),
+
+			sphere_to_cartesian(glm::vec3(1.0, south_the, 0.0 * 2.0 * pi / 5.0 + 2.0 * pi / 10.0)),
+			sphere_to_cartesian(glm::vec3(1.0, south_the, 1.0 * 2.0 * pi / 5.0 + 2.0 * pi / 10.0)),
+			sphere_to_cartesian(glm::vec3(1.0, south_the, 2.0 * 2.0 * pi / 5.0 + 2.0 * pi / 10.0)),
+			sphere_to_cartesian(glm::vec3(1.0, south_the, 3.0 * 2.0 * pi / 5.0 + 2.0 * pi / 10.0)),
+			sphere_to_cartesian(glm::vec3(1.0, south_the, 4.0 * 2.0 * pi / 5.0 + 2.0 * pi / 10.0)),
 			sphere_to_cartesian(glm::vec3(1.0, pi, 0.0)), // south pole
 		};
 
 		glm::vec3 triags[total_vertices] = {
-			icosahedron[0], icosahedron[1], icosahedron[2],
-			icosahedron[0], icosahedron[2], icosahedron[3],
-			icosahedron[0], icosahedron[3], icosahedron[4],
-			icosahedron[0], icosahedron[4], icosahedron[5],
-			icosahedron[0], icosahedron[5], icosahedron[1],
-
-			icosahedron[1], icosahedron[6], icosahedron[2],
-			icosahedron[2], icosahedron[6], icosahedron[7],
-			icosahedron[2], icosahedron[7], icosahedron[3],
-			icosahedron[3], icosahedron[7], icosahedron[8],
-			icosahedron[3], icosahedron[8], icosahedron[4],
-			icosahedron[4], icosahedron[8], icosahedron[9],
-			icosahedron[4], icosahedron[9], icosahedron[5],
-			icosahedron[5], icosahedron[9], icosahedron[10],
-			icosahedron[5], icosahedron[10], icosahedron[1],
-			icosahedron[1], icosahedron[10], icosahedron[6],
+			icosahedron[0], icosahedron[2], icosahedron[1],
+			icosahedron[0], icosahedron[3], icosahedron[2],
+			icosahedron[0], icosahedron[4], icosahedron[3],
+			icosahedron[0], icosahedron[5], icosahedron[4],
+			icosahedron[0], icosahedron[1], icosahedron[5],
 
 			icosahedron[11], icosahedron[6], icosahedron[7],
 			icosahedron[11], icosahedron[7], icosahedron[8],
 			icosahedron[11], icosahedron[8], icosahedron[9],
 			icosahedron[11], icosahedron[9], icosahedron[10],
 			icosahedron[11], icosahedron[10], icosahedron[6],
+
+			icosahedron[1], icosahedron[2], icosahedron[6],
+			icosahedron[6], icosahedron[2], icosahedron[7],
+			icosahedron[7], icosahedron[2], icosahedron[3],
+			icosahedron[3], icosahedron[8], icosahedron[7],
+			icosahedron[8], icosahedron[3], icosahedron[4],
+			icosahedron[4], icosahedron[9], icosahedron[8],
+			icosahedron[4], icosahedron[5], icosahedron[9],
+			icosahedron[5], icosahedron[10], icosahedron[9],
+			icosahedron[10], icosahedron[5], icosahedron[1],
+			icosahedron[1], icosahedron[6], icosahedron[10],
 		};
 
 		mesh_t mesh{};
@@ -327,6 +361,7 @@ namespace {
 		mesh.vertex_attrib.type = GL_FLOAT;
 		mesh.faces = total_faces;
 		mesh.vertices = total_vertices;
+		mesh.mode = GL_TRIANGLES;
 		return mesh;
 	}
 
@@ -335,9 +370,10 @@ namespace {
 	};
 
 	struct vertex_array_t {
-		static vertex_array_t create_dummy() {
-			// TODO
-			return {};
+		static vertex_array_t create() {
+			vertex_array_t vao{};
+			glCreateVertexArrays(1, &vao.id);
+			return vao;
 		}
 
 		vertex_array_t() = default;
@@ -346,7 +382,7 @@ namespace {
 		}
 
 		~vertex_array_t() {
-			if (id != 0) {
+			if (valid()) {
 				glDeleteVertexArrays(1, &id);
 			}
 		}
@@ -363,8 +399,20 @@ namespace {
 			glBindVertexArray(id);
 		}
 
+		bool valid() const {
+			return id != 0;
+		}
+
 		GLuint id{};
 		GLenum mode{};
+		int count{};
+	};
+
+	// TODO
+	struct vertex_array_proxy_t {
+		std::shared_ptr<vertex_array_t> vao;
+		GLenum mode;
+		int first{};
 		int count{};
 	};
 
@@ -411,7 +459,7 @@ namespace {
 		}
 
 		~framebuffer_t() {
-			if (id != 0) {
+			if (valid()) {
 				glDeleteFramebuffers(1, &id);	
 			}
 		}
@@ -468,7 +516,7 @@ namespace {
 		}
 
 		~shader_t() {
-			if (id != 0) {
+			if (valid()) {
 				glDeleteShader(id);
 			}
 		}
@@ -589,13 +637,12 @@ namespace {
 		}
 
 		shader_program_t() = default;
-
 		shader_program_t(shader_program_t&& another) noexcept {
 			*this = std::move(another);
 		}
 
 		~shader_program_t() {
-			if (id) {
+			if (valid()) {
 				glDeleteProgram(id);
 			}
 		}
@@ -680,9 +727,10 @@ namespace {
 		}
 
 		GLuint id{};
-		std::unordered_map<std::string, uniform_props_t> uniforms;
+		uniform_props_map_t uniforms;
 	};
 
+	// TODO : fix light
 	const inline std::string basic_vert_source =
 R"(
 #version 460 core
@@ -725,11 +773,11 @@ void main() {
 	vec3 ambient_color = u_ambient_color;
 
 	vec3 light_ray = normalize(u_light_pos - world_pos);
-	vec3 light_reflected = reflect(light_ray, normal);
-	float diffuse_coef = clamp(dot(light_ray, light_reflected), 0.0, 1.0);
+	float diffuse_coef = clamp(dot(light_ray, normal), 0.0, 1.0);
 	vec3 diffuse_color = diffuse_coef * u_diffuse_color;
 
 	vec3 look_ray = normalize(u_eye_pos - world_pos);
+	vec3 light_reflected = reflect(light_ray, normal);
 	float specular_coef = pow(clamp(dot(look_ray, light_reflected), 0.0, 1.0), u_shininess);
 	vec3 specular_color = vec3(0.0);
 	if (specular_coef > 0.0) {
@@ -737,7 +785,15 @@ void main() {
 		diffuse_color *= (1.0 - specular_coef);
 	}
 
+	float att_coef = 1.0;
+	if (diffuse_coef > 0.0) {
+		float d = length(u_light_pos - world_pos);
+		//att_coef = 1.0 / (1.0 + 0.1 * d + 0.1 * d * d);
+	}
+
 	color = vec4(ambient_color + diffuse_color + specular_color, 1.0);
+	color *= att_coef;
+	//color = vec4(u_diffuse_color, 1.0);
 }
 )";
 
@@ -762,10 +818,10 @@ void main() {
 	}
 
 	using shader_program_setup_t = std::function<void(shader_program_t& program)>;
-	using vertex_array_drawer_t = std::function<void(vertex_array_t& vao)>;
+	using vertex_array_drawer_t = std::function<void(shader_program_t& program, vertex_array_t& vao)>;
 
-	using empty_drawer_t = decltype([] (vertex_array_t&) {});
 	using empty_setup_t = decltype([] (shader_program_t&) {});
+	using empty_drawer_t = decltype([] (shader_program_t&, vertex_array_t&) {});
 
 	// general_setup: some common setups, so there is no need it for each draw command
 	// vao_setups: some sutps specific for each vao draw command
@@ -780,10 +836,9 @@ void main() {
 			general_setup = std::forward<setup_t>(setup);
 		}
 
-		template<class setup_t, class drawer_t>
-		void add_draw_command(std::shared_ptr<vertex_array_t> vao, setup_t&& setup, drawer_t&& drawer) {
+		template<class drawer_t>
+		void add_draw_command(std::shared_ptr<vertex_array_t> vao, drawer_t&& drawer) {
 			vaos.push_back(std::move(vao));
-			vao_setups.push_back(std::forward<setup_t>(setup));
 			vao_drawers.push_back(std::forward<drawer_t>(drawer));
 		}
 
@@ -797,16 +852,13 @@ void main() {
 			for (int i = 0; i < vaos.size(); i++) {
 				if (vaos[i]->id != prev_vao_id) {
 					vaos[i]->bind();
-				} if (vao_setups[i]) {
-					vao_setups[i](*program);
-				} vao_drawers[i](*vaos[i]);
+				} vao_drawers[i](*program, *vaos[i]);
 			}
 		}
 
 		std::shared_ptr<shader_program_t> program;
 		shader_program_setup_t general_setup;
 		std::vector<std::shared_ptr<vertex_array_t>> vaos;
-		std::vector<shader_program_setup_t> vao_setups;
 		std::vector<vertex_array_drawer_t> vao_drawers;
 	};
 
@@ -823,6 +875,7 @@ void main() {
 
 		template<class action_t>
 		void execute_action(action_t&& action) {
+			fbo.bind();
 			for (auto& setup : setups) {
 				setup(fbo);
 				action(fbo);
@@ -877,51 +930,106 @@ int main() {
 		sim_widget_t sim;
 		framebuffer_widget_t framebuffer_widget;
 
-		texture_t tex = gen_test_texture(tex_width, tex_height);
-		if (tex.id == 0) {
+		auto test_tex = ([&] () {
+			return std::make_shared<texture_t>(gen_test_texture(tex_width, tex_height));
+		})();
+
+		auto program_ptr = ([&] () {
+			auto [program, info_log] = gen_basic_shader_program();
+			if (!program.valid()) {
+				std::cerr << info_log << std::endl;
+				return std::shared_ptr<shader_program_t>();
+			} return std::make_shared<shader_program_t>(std::move(program));
+		})();
+		if (!program_ptr) {
 			return -1;
 		}
 
-		auto [program, info_log] = gen_basic_shader_program();
-		if (!program.valid()) {
-			std::cerr << info_log << std::endl;
-			return -1;
-		}
-
-		for (auto& [name, props] : program.uniforms) {
+		for (auto& [name, props] : program_ptr->uniforms) {
 			std::cout << props << std::endl;
 		}
 
-		mesh_t sphere = gen_sphere_mesh();
-		vertex_array_t sphere_vao = gen_vertex_array_from_mesh(sphere);
+		auto sphere_mesh_ptr = ([&] () {
+			return std::make_shared<mesh_t>(gen_sphere_mesh());
+		})();
+
+		auto sphere_vao_ptr = ([&] () {
+			return std::make_shared<vertex_array_t>(gen_vertex_array_from_mesh(*sphere_mesh_ptr));
+		})();
+
+		constexpr int fbo_width = 666;
+		constexpr int fbo_height = 666;
+
+		auto fbo_color = ([&] () {
+			return std::make_shared<texture_t>(gen_empty_texture(fbo_width, fbo_height, Rgba32f));
+		})();
+
+		auto fbo_depth = ([&] () {
+			return std::make_shared<texture_t>(gen_depth_texture(fbo_width, fbo_height, Depth32f));
+		})();
 
 		basic_pass_t pass;
-		pass.add_setup([&] (framebuffer_t&) {
-			std::cout << "Hello from pass setup!" << std::endl;
+		pass.add_setup([&] (framebuffer_t& fbo) {
+			fbo.attach({Color0, fbo_color->id, 0});
+			fbo.attach({Depth, fbo_depth->id, 0});
+			glClearColor(0.0, 0.0, 0.0, 1.0);
+			glClearDepth(1.0);
+			glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+			glEnable(GL_DEPTH_TEST);
+			glEnable(GL_CULL_FACE);
+			glViewport(0, 0, fbo_width, fbo_height);
+			// debug
+			//glDisable(GL_CULL_FACE);
+			//glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
 		});
 
-		basic_render_seq_t render_seq(std::make_shared<shader_program_t>(std::move(program)));
+		// model related params
+		glm::mat4 m = glm::mat4(1.0f);
+		glm::vec3 diffuse_color = glm::vec3(0.0f, 1.0f, 0.0f);
+		float shininess = 3.0f;
+
+		// camera related params
+		glm::vec3 eye = glm::vec3(2.0f, 0.0f, 2.0f);
+		glm::vec3 center = glm::vec3(0.0f, 0.0f, 0.0f);
+		glm::vec3 up = glm::vec3(0.0f, 1.0f, 0.0f);
+		glm::mat4 v = glm::translate(glm::lookAt(eye, center, up), -eye);
+		glm::mat4 p = glm::perspective(glm::radians(45.0f), (float)fbo_width / fbo_height, 0.1f, 100.0f);
+
+		// light related params
+		glm::vec3 ambient_color = glm::vec3(0.1f, 0.1f, 0.1f);
+		glm::vec3 light_color = glm::vec3(0.8f, 0.8f, 0.8f);
+		glm::vec3 light_pos = eye;
+
+		basic_render_seq_t render_seq(program_ptr);
 		render_seq.set_general_setup([&] (shader_program_t& program) {
-			std::cout << "Hello from render_seq general setup!" << std::endl;
+			program.set_mat4("u_m", m);
+			program.set_mat4("u_v", v);
+			program.set_mat4("u_p", p);
+			program.set_vec3("u_diffuse_color", diffuse_color);
+			program.set_float("u_shininess", shininess);
+			program.set_vec3("u_ambient_color", ambient_color);
+			program.set_vec3("u_light_color", light_color);
+			program.set_vec3("u_light_pos", light_pos);
+			program.set_vec3("u_eye_pos", eye);
 		});
-		render_seq.add_draw_command(std::make_shared<vertex_array_t>(std::move(sphere_vao)),
-			[&] (shader_program_t&) {
-				std::cout << "Hello from vao_setup!" << std::endl;
-			},
-			[&] (vertex_array_t&) {
-				std::cout << "Hello from vao_drawer!" << std::endl;
+
+		render_seq.add_draw_command(sphere_vao_ptr,
+			[&] (shader_program_t& program, vertex_array_t& vao) {
+				glDrawArrays(vao.mode, 0, vao.count);
 			}
 		);
-
-		pass.execute_action([&] (framebuffer_t& fbo) {
-			render_seq.draw();
-		});
 
 		while (!window.should_close()) {
 			glfw::poll_events();
 
-			glClearColor(1.0, 0.5, 0.25, 1.0);
-			glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+			// workaround
+			m = glm::rotate(m, glm::radians(1.5f), glm::vec3(0.0f, 1.0f, 0.0f));
+			eye.y = std::sin(glfw::get_time());
+			v = glm::translate(glm::lookAt(eye, center, up), -eye);
+
+			pass.execute_action([&] (framebuffer_t& fbo) {
+				render_seq.draw();
+			});
 
 			ImGui_ImplOpenGL3_NewFrame();
 			ImGui_ImplGlfw_NewFrame();
@@ -929,10 +1037,15 @@ int main() {
 
 			//demo.render();
 			//sim.render();
-			framebuffer_widget.render(reinterpret_cast<ImTextureID>(tex.id), tex.width, tex.height);
+			framebuffer_widget.render(reinterpret_cast<ImTextureID>(fbo_color->id), fbo_color->width, fbo_color->height);
 
 			ImGui::Render();
+
+			// workaround
 			auto [w, h] = window.get_framebuffer_size();
+			glBindFramebuffer(GL_FRAMEBUFFER, 0);
+			glClearColor(1.0, 0.5, 0.25, 1.0);
+			glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
 			glViewport(0, 0, w, h);
 			ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
