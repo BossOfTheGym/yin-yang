@@ -1015,6 +1015,8 @@ void main() {
 	struct attractor_t {
 		glm::vec3 pos{};
 		float gm{};
+		float min_dist{};
+		float max_dist{};
 	};
 
 	// directional force
@@ -1058,8 +1060,12 @@ void main() {
 		force_t compute_force(body_t& body) const {
 			force_t total_force{};
 			for (auto& [handle, attractor] : attractors) {
-				glm::vec3 dr = body.pos - attractor.pos;
-				total_force.dir += attractor.gm / glm::dot(dr, dr) * dr / glm::length(dr);
+				glm::vec3 dr =  attractor.pos - body.pos;
+				float dr_mag = glm::length(dr);
+				float dr_mag2 = glm::dot(dr, dr);
+				if (attractor.min_dist <= dr_mag && dr_mag <= attractor.max_dist) {
+					total_force.dir += attractor.gm / dr_mag2 * dr / dr_mag;
+				}
 			} for (auto& [handle, force] : forces) {
 				total_force.dir += force.dir;
 			} return total_force;
@@ -1075,41 +1081,39 @@ void main() {
 		}
 	};
 
-	// TODO
 	struct transform_t {
-		transform_t()
-			: base(glm::mat4(1.0f))
-			, scale(glm::vec3(1.0f))
-			, rotation(glm::from)
-			, translate(glm::vec3(0.0)) {
-			// TODO
-		}
-
-		glm::mat4 to_mat4() const {
-
+		operator glm::mat4() const {
+			auto mat_scale = glm::scale(base, scale);
+			auto mat_rotation = glm::mat4_cast(rotation);
+			auto mat_translation = glm::translate(glm::mat4(1.0f), translation);
+			return mat_translation * mat_rotation * mat_scale;
 		}
 
 		glm::mat4 base{};
 		glm::vec3 scale{};
 		glm::quat rotation{};
-		glm::vec3 translate{};
+		glm::vec3 translation{};
 	};
 
 	struct physics_t {
-		glm::vec3 pos{}; 
+		glm::vec3 pos{};
 		glm::vec3 vel{};
-		glm::vec3 ang_vel{};
 		float mass{};
 		float radius{};
 	};
 
 	struct material_t {
 		glm::vec3 color{};
+		float specular_strength{};
 		float shininess{};
 	};
 
 	// giant abomination, yep
 	struct object_t {
+		void update() {
+			transform.translation = physics.pos;
+		}
+
 		transform_t transform;
 		physics_t physics;
 		material_t material;
@@ -1136,8 +1140,8 @@ void main() {
 }
 
 int main() {
-	constexpr int window_width = 400;
-	constexpr int window_height = 400;
+	constexpr int window_width = 1280;
+	constexpr int window_height = 720;
 
 	glfw::guard_t glfw_guard;
 	glfw::window_t window(glfw::window_params_t::create_basic_opengl("yin-yang", window_width, window_height, 4, 6));
@@ -1189,8 +1193,8 @@ int main() {
 			return std::make_shared<vertex_array_t>(gen_vertex_array_from_mesh(*sphere_mesh_ptr));
 		})();
 
-		constexpr int fbo_width = 300;
-		constexpr int fbo_height = 300;
+		constexpr int fbo_width = 800;
+		constexpr int fbo_height = 600;
 
 		auto fbo_color = ([&] () {
 			return std::make_shared<texture_t>(gen_empty_texture(fbo_width, fbo_height, Rgba32f));
@@ -1213,15 +1217,24 @@ int main() {
 		});
 
 		// model related params
-		glm::mat4 m = glm::mat4(1.0f);
-		glm::vec3 object_color = glm::vec3(1.0f, 0.5f, 0.25f);
-		float shininess = 32.0f;
-		float specular_strength = 0.5;
+		object_t object = {
+			.transform {
+				.base = glm::mat4(1.0f),
+				.scale = glm::vec3(1.0f), .rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f), .translation = glm::vec3(0.0f) 
+			},
+			.physics = {
+				.pos = glm::vec3(0.0f, 0.0f, 5.0f),
+				.vel = glm::vec3(0.0f, 0.0f, 0.0f),
+			},
+			.material = {
+				.color = glm::vec3(0.0f, 1.0f, 0.0f), .specular_strength = 0.5f, .shininess = 32.0f,
+			}
+		};
 
 		// camera related params
-		glm::vec3 eye = glm::vec3(2.0f, 0.0f, 2.0f);
+		glm::vec3 eye = glm::vec3(0.0f, 10.0f, 0.0f);
 		glm::vec3 center = glm::vec3(0.0f, 0.0f, 0.0f);
-		glm::vec3 up = glm::vec3(0.0f, 1.0f, 0.0f);
+		glm::vec3 up = glm::vec3(0.0f, 0.0f, 1.0f);
 		glm::mat4 v = glm::translate(glm::lookAt(eye, center, up), -eye);
 		glm::mat4 p = glm::perspective(glm::radians(45.0f), (float)fbo_width / fbo_height, 0.1f, 100.0f);
 
@@ -1232,12 +1245,12 @@ int main() {
 
 		basic_render_seq_t render_seq(program_ptr);
 		render_seq.set_general_setup([&] (shader_program_t& program) {
-			program.set_mat4("u_m", m);
+			program.set_mat4("u_m", (glm::mat4)object.transform);
 			program.set_mat4("u_v", v);
 			program.set_mat4("u_p", p);
-			program.set_vec3("u_object_color", object_color);
-			program.set_float("u_shininess", shininess);
-			program.set_float("u_specular_strength", specular_strength);
+			program.set_vec3("u_object_color", object.material.color);
+			program.set_float("u_shininess", object.material.shininess);
+			program.set_float("u_specular_strength", object.material.specular_strength);
 			program.set_vec3("u_ambient_color", ambient_color);
 			program.set_vec3("u_light_color", light_color);
 			program.set_vec3("u_light_pos", light_pos);
@@ -1251,15 +1264,18 @@ int main() {
 		);
 
 		velocity_verlet_integrator_t vel_ver_int;
-		vel_ver_int.add_attractor({.gm = 3.0f, .pos = glm::vec3(0.0f)});
+		auto attractor0 = vel_ver_int.add_attractor({
+			.pos = glm::vec3(+2.0f, 0.0f, 0.0f), .gm = 30.0f, .min_dist = 0.1, .max_dist = 10.0f
+		});
+		auto attractor1 = vel_ver_int.add_attractor({
+			.pos = glm::vec3(-2.0f, 0.0f, 0.0f), .gm = 30.0f, .min_dist = 0.1, .max_dist = 10.0f
+		});
 
 		while (!window.should_close()) {
 			glfw::poll_events();
 
-			// workaround
-			m = glm::rotate(m, glm::radians(1.0f), glm::vec3(0.0f, 1.0f, 0.0f));
-			eye.y = 0.5f * std::sin(glfw::get_time());
-			v = glm::translate(glm::lookAt(eye, center, up), -eye);
+			vel_ver_int.update(object.physics, 0.05f);
+			object.update();
 
 			pass.execute_action([&] (framebuffer_t& fbo) {
 				render_seq.draw();
