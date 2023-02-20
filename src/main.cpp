@@ -297,8 +297,9 @@ namespace {
 		return glm::vec3(r * sin_the * cos_phi, r * cos_the, r * sin_the * sin_phi);
 	}
 
-	// TODO : subdivision
 	mesh_t gen_sphere_mesh(int subdiv = 0) {
+		assert(subdiv >= 0);
+
 		constexpr float pi = 3.14159265359;
 		constexpr float angle = std::atan(0.5);
 		constexpr float north_the = pi / 2.0 - angle;
@@ -308,7 +309,7 @@ namespace {
 		constexpr int total_faces = 20;
 		constexpr int total_vertices = 3 * total_faces;
 
-		glm::vec3 icosahedron[ico_vertices] = {
+		glm::vec3 icosahedron_verts[ico_vertices] = {
 			sphere_to_cartesian(glm::vec3(1.0, 0.0, 0.0)), // north pole
 			sphere_to_cartesian(glm::vec3(1.0, north_the, 0.0 * 2.0 * pi / 5.0)),
 			sphere_to_cartesian(glm::vec3(1.0, north_the, 1.0 * 2.0 * pi / 5.0)),
@@ -324,34 +325,56 @@ namespace {
 			sphere_to_cartesian(glm::vec3(1.0, pi, 0.0)), // south pole
 		};
 
-		glm::vec3 triags[total_vertices] = {
-			icosahedron[0], icosahedron[2], icosahedron[1],
-			icosahedron[0], icosahedron[3], icosahedron[2],
-			icosahedron[0], icosahedron[4], icosahedron[3],
-			icosahedron[0], icosahedron[5], icosahedron[4],
-			icosahedron[0], icosahedron[1], icosahedron[5],
-
-			icosahedron[11], icosahedron[6], icosahedron[7],
-			icosahedron[11], icosahedron[7], icosahedron[8],
-			icosahedron[11], icosahedron[8], icosahedron[9],
-			icosahedron[11], icosahedron[9], icosahedron[10],
-			icosahedron[11], icosahedron[10], icosahedron[6],
-
-			icosahedron[1], icosahedron[2], icosahedron[6],
-			icosahedron[6], icosahedron[2], icosahedron[7],
-			icosahedron[7], icosahedron[2], icosahedron[3],
-			icosahedron[3], icosahedron[8], icosahedron[7],
-			icosahedron[8], icosahedron[3], icosahedron[4],
-			icosahedron[4], icosahedron[9], icosahedron[8],
-			icosahedron[4], icosahedron[5], icosahedron[9],
-			icosahedron[5], icosahedron[10], icosahedron[9],
-			icosahedron[10], icosahedron[5], icosahedron[1],
-			icosahedron[1], icosahedron[6], icosahedron[10],
+		struct face_t {
+			glm::vec3 v0, v1, v2;
 		};
+
+		face_t icosahedron_faces[total_vertices] = {
+			{icosahedron_verts[0], icosahedron_verts[2], icosahedron_verts[1]},
+			{icosahedron_verts[0], icosahedron_verts[3], icosahedron_verts[2]},
+			{icosahedron_verts[0], icosahedron_verts[4], icosahedron_verts[3]},
+			{icosahedron_verts[0], icosahedron_verts[5], icosahedron_verts[4]},
+			{icosahedron_verts[0], icosahedron_verts[1], icosahedron_verts[5]},
+
+			{icosahedron_verts[1], icosahedron_verts[2], icosahedron_verts[6]},
+			{icosahedron_verts[6], icosahedron_verts[2], icosahedron_verts[7]},
+			{icosahedron_verts[7], icosahedron_verts[2], icosahedron_verts[3]},
+			{icosahedron_verts[3], icosahedron_verts[8], icosahedron_verts[7]},
+			{icosahedron_verts[8], icosahedron_verts[3], icosahedron_verts[4]},
+			{icosahedron_verts[4], icosahedron_verts[9], icosahedron_verts[8]},
+			{icosahedron_verts[4], icosahedron_verts[5], icosahedron_verts[9]},
+			{icosahedron_verts[5], icosahedron_verts[10], icosahedron_verts[9]},
+			{icosahedron_verts[10], icosahedron_verts[5], icosahedron_verts[1]},
+			{icosahedron_verts[1], icosahedron_verts[6], icosahedron_verts[10]},
+
+			{icosahedron_verts[11], icosahedron_verts[6], icosahedron_verts[7]},
+			{icosahedron_verts[11], icosahedron_verts[7], icosahedron_verts[8]},
+			{icosahedron_verts[11], icosahedron_verts[8], icosahedron_verts[9]},
+			{icosahedron_verts[11], icosahedron_verts[9], icosahedron_verts[10]},
+			{icosahedron_verts[11], icosahedron_verts[10], icosahedron_verts[6]},
+		};
+
+		std::vector<face_t> subdivided;
+		subdivided.reserve(total_vertices << (subdiv << 1)); // a << (b << 1) = a * 2 ^ (b * 2) = a * 4 ^ b
+		for (auto& face : icosahedron_faces) {
+			subdivided.push_back(face);
+		} for (int i = 0; i < subdiv; i++) {
+			int current_subdiv = subdivided.size();
+			for (int j = 0; j < current_subdiv; j++) {
+				auto [v0, v1, v2] = subdivided[j];
+				glm::vec3 v01 = glm::normalize((v0 + v1) / 2.0f);
+				glm::vec3 v12 = glm::normalize((v1 + v2) / 2.0f);
+				glm::vec3 v20 = glm::normalize((v2 + v0) / 2.0f);
+				subdivided[j] = {v01, v12, v20};
+				subdivided.push_back({v0, v01, v20});
+				subdivided.push_back({v1, v12, v01});
+				subdivided.push_back({v2, v20, v12});
+			}
+		}
 
 		mesh_t mesh{};
 		glCreateBuffers(1, &mesh.id);
-		glNamedBufferStorage(mesh.id, sizeof(triags), triags, 0);
+		glNamedBufferStorage(mesh.id, sizeof(face_t) * subdivided.size(), subdivided.data(), 0);
 		mesh.vertex_buffer.offset = 0;
 		mesh.vertex_buffer.stride = 3 * sizeof(float);
 		mesh.vertex_attrib.attrib_index = Vertex0;
@@ -359,8 +382,8 @@ namespace {
 		mesh.vertex_attrib.relative_offset = 0;
 		mesh.vertex_attrib.size = 3;
 		mesh.vertex_attrib.type = GL_FLOAT;
-		mesh.faces = total_faces;
-		mesh.vertices = total_vertices;
+		mesh.faces = subdivided.size();
+		mesh.vertices = subdivided.size() * 3;
 		mesh.mode = GL_TRIANGLES;
 		return mesh;
 	}
@@ -730,7 +753,6 @@ namespace {
 		uniform_props_map_t uniforms;
 	};
 
-	// TODO : fix light
 	const inline std::string basic_vert_source =
 R"(
 #version 460 core
@@ -951,7 +973,7 @@ int main() {
 		}
 
 		auto sphere_mesh_ptr = ([&] () {
-			return std::make_shared<mesh_t>(gen_sphere_mesh());
+			return std::make_shared<mesh_t>(gen_sphere_mesh(1));
 		})();
 
 		auto sphere_vao_ptr = ([&] () {
@@ -979,9 +1001,6 @@ int main() {
 			glEnable(GL_DEPTH_TEST);
 			glEnable(GL_CULL_FACE);
 			glViewport(0, 0, fbo_width, fbo_height);
-			// debug
-			//glDisable(GL_CULL_FACE);
-			//glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
 		});
 
 		// model related params
@@ -1027,7 +1046,7 @@ int main() {
 
 			// workaround
 			m = glm::rotate(m, glm::radians(1.0f), glm::vec3(0.0f, 1.0f, 0.0f));
-			eye.y = std::sin(glfw::get_time());
+			eye.y = 0.5f * std::sin(glfw::get_time());
 			v = glm::translate(glm::lookAt(eye, center, up), -eye);
 
 			pass.execute_action([&] (framebuffer_t& fbo) {
