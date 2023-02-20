@@ -411,7 +411,7 @@ namespace {
 	// TODO
 	struct vertex_array_proxy_t {
 		std::shared_ptr<vertex_array_t> vao;
-		GLenum mode;
+		GLenum mode{};
 		int first{};
 		int count{};
 	};
@@ -756,34 +756,33 @@ layout(location = 0) out vec4 color;
 
 in vec3 world_pos;
 
-uniform vec3 u_diffuse_color;
+uniform vec3 u_object_color;
 uniform float u_shininess;
+uniform float u_specular_strength;
+
+uniform vec3 u_eye_pos;
 
 uniform vec3 u_ambient_color;
 uniform vec3 u_light_color;
 uniform vec3 u_light_pos;
-
-uniform vec3 u_eye_pos;
 
 void main() {
 	vec3 v0 = dFdxFine(world_pos);
 	vec3 v1 = dFdyFine(world_pos);
 	vec3 normal = normalize(cross(v0, v1));
 
-	vec3 ambient_color = u_ambient_color;
+	vec3 object_color = u_object_color;
+
+	vec3 ambient = u_ambient_color;
 
 	vec3 light_ray = normalize(u_light_pos - world_pos);
 	float diffuse_coef = clamp(dot(light_ray, normal), 0.0, 1.0);
-	vec3 diffuse_color = diffuse_coef * u_diffuse_color;
+	vec3 diffuse = diffuse_coef * u_light_color;
 
 	vec3 look_ray = normalize(u_eye_pos - world_pos);
-	vec3 light_reflected = reflect(light_ray, normal);
-	float specular_coef = pow(clamp(dot(look_ray, light_reflected), 0.0, 1.0), u_shininess);
-	vec3 specular_color = vec3(0.0);
-	if (specular_coef > 0.0) {
-		specular_color = specular_coef * u_light_color;
-		diffuse_color *= (1.0 - specular_coef);
-	}
+	vec3 light_reflected = reflect(-light_ray, normal);
+	float specular_coef = u_specular_strength * pow(clamp(dot(look_ray, light_reflected), 0.0, 1.0), u_shininess);
+	vec3 specular = specular_coef * u_light_color;
 
 	float att_coef = 1.0;
 	if (diffuse_coef > 0.0) {
@@ -791,9 +790,8 @@ void main() {
 		//att_coef = 1.0 / (1.0 + 0.1 * d + 0.1 * d * d);
 	}
 
-	color = vec4(ambient_color + diffuse_color + specular_color, 1.0);
+	color = vec4((ambient + diffuse + specular) * object_color, 1.0);
 	color *= att_coef;
-	//color = vec4(u_diffuse_color, 1.0);
 }
 )";
 
@@ -907,8 +905,11 @@ void main() {
 }
 
 int main() {
+	constexpr int window_width = 400;
+	constexpr int window_height = 400;
+
 	glfw::guard_t glfw_guard;
-	glfw::window_t window(glfw::window_params_t::create_basic_opengl("yin-yang", 1280, 720, 4, 6));
+	glfw::window_t window(glfw::window_params_t::create_basic_opengl("yin-yang", window_width, window_height, 4, 6));
 
 	window.make_ctx_current();
 
@@ -922,7 +923,7 @@ int main() {
 
 	bool show_demo_window = true;
 	{
-		constexpr int tex_width = 512;
+		constexpr int tex_width = 256;
 		constexpr int tex_height = 256;
 
 		glew_guard_t glew_guard;
@@ -957,8 +958,8 @@ int main() {
 			return std::make_shared<vertex_array_t>(gen_vertex_array_from_mesh(*sphere_mesh_ptr));
 		})();
 
-		constexpr int fbo_width = 666;
-		constexpr int fbo_height = 666;
+		constexpr int fbo_width = 300;
+		constexpr int fbo_height = 300;
 
 		auto fbo_color = ([&] () {
 			return std::make_shared<texture_t>(gen_empty_texture(fbo_width, fbo_height, Rgba32f));
@@ -985,8 +986,9 @@ int main() {
 
 		// model related params
 		glm::mat4 m = glm::mat4(1.0f);
-		glm::vec3 diffuse_color = glm::vec3(0.0f, 1.0f, 0.0f);
-		float shininess = 3.0f;
+		glm::vec3 object_color = glm::vec3(1.0f, 0.5f, 0.25f);
+		float shininess = 32.0f;
+		float specular_strength = 0.5;
 
 		// camera related params
 		glm::vec3 eye = glm::vec3(2.0f, 0.0f, 2.0f);
@@ -997,7 +999,7 @@ int main() {
 
 		// light related params
 		glm::vec3 ambient_color = glm::vec3(0.1f, 0.1f, 0.1f);
-		glm::vec3 light_color = glm::vec3(0.8f, 0.8f, 0.8f);
+		glm::vec3 light_color = glm::vec3(1.0f, 1.0f, 1.0f);
 		glm::vec3 light_pos = eye;
 
 		basic_render_seq_t render_seq(program_ptr);
@@ -1005,8 +1007,9 @@ int main() {
 			program.set_mat4("u_m", m);
 			program.set_mat4("u_v", v);
 			program.set_mat4("u_p", p);
-			program.set_vec3("u_diffuse_color", diffuse_color);
+			program.set_vec3("u_object_color", object_color);
 			program.set_float("u_shininess", shininess);
+			program.set_float("u_specular_strength", specular_strength);
 			program.set_vec3("u_ambient_color", ambient_color);
 			program.set_vec3("u_light_color", light_color);
 			program.set_vec3("u_light_pos", light_pos);
@@ -1023,7 +1026,7 @@ int main() {
 			glfw::poll_events();
 
 			// workaround
-			m = glm::rotate(m, glm::radians(1.5f), glm::vec3(0.0f, 1.0f, 0.0f));
+			m = glm::rotate(m, glm::radians(1.0f), glm::vec3(0.0f, 1.0f, 0.0f));
 			eye.y = std::sin(glfw::get_time());
 			v = glm::translate(glm::lookAt(eye, center, up), -eye);
 
