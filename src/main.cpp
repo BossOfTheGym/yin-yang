@@ -906,10 +906,219 @@ void main() {
 		std::vector<pass_setup_t> setups;
 	};
 
-	// TODO : basic physics
-	// TOOD : sphere shape
-	// TODO : force application
-	// TODO : collision handling
+	namespace impl {
+		template<class __handle_t, auto __null_handle>
+		struct handle_pool_t {
+		public:
+			using handle_t = __handle_t;
+
+			static constexpr handle_t null_handle = __null_handle;
+
+		private:
+			void extend() {
+				std::size_t old_size = handles.size();
+				std::size_t new_size = 2 * old_size + 1;
+				handles.resize(new_size);
+				for (std::size_t i = old_size + 1; i < new_size; i++) {
+					handles[i - 1] = i;
+				}
+				handles[new_size - 1] = head;
+				head = old_size;
+			}
+
+		public:
+			handle_t acquire() {
+				if (head == null_handle) {
+					extend();
+				}
+				handle_t handle = head;
+				head = handles[handle];
+				handles[handle] = handle;
+				return handle;
+			}
+
+			void release(handle_t handle) {
+				assert(is_used(handle));
+				handles[handle] = head;
+				head = handle;
+			}
+
+			bool is_used(handle_t handle) const {
+				assert((size_t)handle < handles.size());
+				return handles[handle] == handle;
+			}
+
+			void clear() {
+				head = 0;
+				for (int i = 1; i < handles.size(); i++) {
+					handles[i - 1] = i;
+				} handles.back() = null_handle;
+			}
+
+		private:
+			std::vector<handle_t> handles;
+			handle_t head{null_handle};
+		};
+	}
+	
+	using handle_t = unsigned;
+	inline constexpr handle_t null_handle = ~0;
+
+	using handle_pool_t = impl::handle_pool_t<handle_t, null_handle>;
+
+	// simplified
+	template<class object_t>
+	struct object_storage_t {
+		using handles_t = handle_pool_t;	
+		using storage_t = std::unordered_map<handle_t, object_t>;
+
+		handle_t add(const object_t& object) {
+			handle_t handle = handles.acquire();
+			assert(get(handle) == nullptr);
+			objects[handle] = object;
+			return handle;
+		}
+
+		void del(handle_t handle) {
+			objects.erase(handle);
+			handles.release(handle);
+		}
+
+		object_t* get(handle_t handle) {
+			if (auto it = objects.find(handle); it != objects.end()) {
+				return &it->second;
+			} return nullptr;
+		}
+
+		auto begin() {
+			return objects.begin();
+		}
+
+		auto begin() const {
+			return objects.begin();
+		}
+
+		auto end() {
+			return objects.end();
+		}
+
+		auto end() const {
+			return objects.end();
+		}
+
+		handles_t handles;
+		storage_t objects;
+	};
+
+	// point attractor
+	// a = GM / |r - r0|^2 * (r - r0) / |r - r0|
+	struct attractor_t {
+		glm::vec3 pos{};
+		float gm{};
+	};
+
+	// directional force
+	struct force_t {
+		glm::vec3 dir{};
+	};
+
+	// velocity-verlet integrator
+	struct velocity_verlet_integrator_t {
+		handle_t add_attractor(const attractor_t& attractor) {
+			return attractors.add(attractor);
+		}
+
+		void del_attractor(handle_t handle) {
+			attractors.del(handle);
+		}
+
+		attractor_t* get_attractor(handle_t handle) {
+			return attractors.get(handle);
+		}
+
+		object_storage_t<attractor_t> attractors;
+
+
+		handle_t add_force(const force_t& force) {
+			return forces.add(force);
+		}
+
+		void del_force(handle_t handle) {
+			forces.del(handle);
+		}
+
+		force_t* get_force(handle_t handle) {
+			return forces.get(handle);
+		}
+
+		object_storage_t<force_t> forces;
+
+
+		template<class body_t>
+		force_t compute_force(body_t& body) const {
+			force_t total_force{};
+			for (auto& [handle, attractor] : attractors) {
+				glm::vec3 dr = body.pos - attractor.pos;
+				total_force.dir += attractor.gm / glm::dot(dr, dr) * dr / glm::length(dr);
+			} for (auto& [handle, force] : forces) {
+				total_force.dir += force.dir;
+			} return total_force;
+		}
+
+		template<class body_t>
+		void update(body_t& body, float dt) {
+			force_t f0 = compute_force(body);
+			glm::vec3 vel_tmp = body.vel + 0.5f * f0.dir * dt;
+			body.pos = body.pos + vel_tmp * dt;
+			force_t f1 = compute_force(body);
+			body.vel = vel_tmp + 0.5f * f1.dir * dt;
+		}
+	};
+
+	// TODO
+	struct transform_t {
+		transform_t()
+			: base(glm::mat4(1.0f))
+			, scale(glm::vec3(1.0f))
+			, rotation(glm::from)
+			, translate(glm::vec3(0.0)) {
+			// TODO
+		}
+
+		glm::mat4 to_mat4() const {
+
+		}
+
+		glm::mat4 base{};
+		glm::vec3 scale{};
+		glm::quat rotation{};
+		glm::vec3 translate{};
+	};
+
+	struct physics_t {
+		glm::vec3 pos{}; 
+		glm::vec3 vel{};
+		glm::vec3 ang_vel{};
+		float mass{};
+		float radius{};
+	};
+
+	struct material_t {
+		glm::vec3 color{};
+		float shininess{};
+	};
+
+	// giant abomination, yep
+	struct object_t {
+		transform_t transform;
+		physics_t physics;
+		material_t material;
+	};
+
+	// TODO : object storage
+	// objects are stored somewhere... let it be some handle-object map
+
+	// TODO : collision resolution
 
 	// TODO : advanced drawing
 	// TODO : G-buffer
@@ -1040,6 +1249,9 @@ int main() {
 				glDrawArrays(vao.mode, 0, vao.count);
 			}
 		);
+
+		velocity_verlet_integrator_t vel_ver_int;
+		vel_ver_int.add_attractor({.gm = 3.0f, .pos = glm::vec3(0.0f)});
 
 		while (!window.should_close()) {
 			glfw::poll_events();
