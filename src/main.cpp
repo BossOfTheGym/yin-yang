@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <variant>
+#include <optional>
 #include <iostream>
 #include <exception>
 #include <stdexcept>
@@ -837,16 +838,16 @@ void main() {
 		} return std::make_tuple(std::move(program), out.str());
 	}
 
-	using shader_program_setup_t = std::function<void(shader_program_t& program)>;
-	using vertex_array_drawer_t = std::function<void(shader_program_t& program, vertex_array_t& vao)>;
-
-	using empty_setup_t = decltype([] (shader_program_t&) {});
-	using empty_drawer_t = decltype([] (shader_program_t&, vertex_array_t&) {});
-
 	// general_setup: some common setups, so there is no need it for each draw command
 	// vao_setups: some sutps specific for each vao draw command
 	// vao_drawers: draw command, how to draw each vao
 	struct basic_render_seq_t {
+		using shader_program_setup_t = std::function<void(shader_program_t& program)>;
+		using vertex_array_drawer_t = std::function<void(shader_program_t& program, vertex_array_t& vao)>;
+
+		using empty_setup_t = decltype([] (shader_program_t&) {});
+		using empty_drawer_t = decltype([] (shader_program_t&, vertex_array_t&) {});
+
 		basic_render_seq_t(std::shared_ptr<shader_program_t> _program) : program{std::move(_program)} {
 			assert(program && program->valid());
 		}
@@ -882,10 +883,10 @@ void main() {
 		std::vector<vertex_array_drawer_t> vao_drawers;
 	};
 
-	using pass_setup_t = std::function<void(framebuffer_t&)>;
-	using pass_action_t = pass_setup_t;
-
 	struct basic_pass_t {
+		using pass_setup_t = std::function<void(framebuffer_t&)>;
+		using pass_action_t = pass_setup_t;
+
 		basic_pass_t() : fbo{framebuffer_t::create()} {}
 
 		template<class setup_t>
@@ -966,12 +967,12 @@ void main() {
 
 	using handle_pool_t = impl::handle_pool_t<handle_t, null_handle>;
 
-	// simplified
 	template<class object_t>
-	struct object_storage_t {
+	struct handle_storage_t {
 		using handles_t = handle_pool_t;	
 		using storage_t = std::unordered_map<handle_t, object_t>;
 
+		// simplified
 		handle_t add(const object_t& object) {
 			handle_t handle = handles.acquire();
 			assert(get(handle) == nullptr);
@@ -1025,48 +1026,71 @@ void main() {
 	};
 
 	// velocity-verlet integrator
+	// TODO : rework, stores handles only + on init get fetcher object
 	struct velocity_verlet_integrator_t {
-		handle_t add_attractor(const attractor_t& attractor) {
-			return attractors.add(attractor);
+		using attractor_accessor_t = std::function<attractor_t*(handle_t)>;
+
+		template<class accessor_t>
+		void set_attractor_accessor(accessor_t&& accessor) {
+			attractor_accessor = std::forward<accessor_t>(accessor);
+		}
+
+		attractor_t& access_attractor(handle_t handle) const {
+			return *attractor_accessor(handle);
+		}
+
+		attractor_accessor_t attractor_accessor;
+
+
+		using force_accessor_t = std::function<force_t*(handle_t)>;
+
+		template<class accessor_t>
+		void set_force_accessor(accessor_t&& accessor) {
+			force_accessor = std::forward<accessor_t>(accessor);
+		}
+
+		force_t& access_force(handle_t handle) const {
+			return *force_accessor(handle);
+		}
+
+		force_accessor_t force_accessor;
+
+
+		void add_attractor(handle_t handle) {
+			attractor_handles.insert(handle);
 		}
 
 		void del_attractor(handle_t handle) {
-			attractors.del(handle);
+			attractor_handles.erase(handle);
 		}
 
-		attractor_t* get_attractor(handle_t handle) {
-			return attractors.get(handle);
-		}
-
-		object_storage_t<attractor_t> attractors;
+		std::unordered_set<handle_t> attractor_handles;
 
 
-		handle_t add_force(const force_t& force) {
-			return forces.add(force);
+		void add_force(handle_t handle) {
+			force_handles.insert(handle);
 		}
 
 		void del_force(handle_t handle) {
-			forces.del(handle);
+			force_handles.erase(handle);
 		}
 
-		force_t* get_force(handle_t handle) {
-			return forces.get(handle);
-		}
-
-		object_storage_t<force_t> forces;
+		std::unordered_set<handle_t> force_handles;
 
 
 		template<class body_t>
 		force_t compute_force(body_t& body) const {
 			force_t total_force{};
-			for (auto& [handle, attractor] : attractors) {
+			for (auto handle : attractor_handles) {
+				auto& attractor = access_attractor(handle); // oh no, we're going to crash :D
 				glm::vec3 dr =  attractor.pos - body.pos;
 				float dr_mag = glm::length(dr);
 				float dr_mag2 = glm::dot(dr, dr);
 				if (attractor.min_dist <= dr_mag && dr_mag <= attractor.max_dist) {
 					total_force.dir += attractor.gm / dr_mag2 * dr / dr_mag;
 				}
-			} for (auto& [handle, force] : forces) {
+			} for (auto handle : force_handles) {
+				auto& force = access_force(handle); // oh no, we're going to crash :D
 				total_force.dir += force.dir;
 			} return total_force;
 		}
@@ -1081,8 +1105,42 @@ void main() {
 		}
 	};
 
+	// center = r + t * v, t from [0, 1]
+	// returns t - time of the first contact
+	template<float eps = 1e-6>
+	std::optional<float> collide_moving_sphere_sphere(const glm::vec3& r0, const glm::vec3& v0, float rad0,
+									const glm::vec3& r1, const glm::vec3& v1, float rad1) {
+		glm::vec3 dr = r1 - r0;
+		glm::vec3 dv = v1 - v0;
+		float rad = rad0 + rad1;
+		float c = glm::dot(dr, dr) - rad * rad;
+		if (c < eps) {
+			return 0.0f;
+		}
+		float a = glm::dot(dv, dv);
+		if (a < eps) {
+			return std::nullopt;
+		}
+		float b = glm::dot(dr, dv);
+		if (b > eps) {
+			return std::nullopt;
+		}
+		float d = b * b - a * c;
+		if (d < eps) {
+			return std::nullopt;
+		} return (-b - std::sqrt(d)) / a;
+	}
+
+	template<float eps = 1e-6>
+	glm::vec3 get_sphere_sphere_contact(const glm::vec3& r0, const glm::vec3& v0,
+									const glm::vec3& r1, const glm::vec3& v1, float rad0, float t) {
+		glm::vec3 r0t = r0 + t * v0;
+		glm::vec3 r1t = r1 + t * v1;
+		return rad0 * glm::normalize(r1t - r0t);
+	} 
+
 	struct transform_t {
-		operator glm::mat4() const {
+		glm::mat4 to_mat4() const {
 			auto mat_scale = glm::scale(base, scale);
 			auto mat_rotation = glm::mat4_cast(rotation);
 			auto mat_translation = glm::translate(glm::mat4(1.0f), translation);
@@ -1108,21 +1166,58 @@ void main() {
 		float shininess{};
 	};
 
-	// giant abomination, yep
-	struct object_t {
-		void update() {
-			transform.translation = physics.pos;
+	struct camera_t {
+		glm::mat4 get_view() const {
+			return glm::translate(glm::lookAt(eye, center, up), -eye);
 		}
 
-		transform_t transform;
-		physics_t physics;
-		material_t material;
+		glm::mat4 get_proj() const {
+			return glm::perspective(glm::radians(45.0f), aspect_ratio, 0.1f, 100.0f);
+		}
+
+		float fov{};
+		float aspect_ratio{};
+		float near{};
+		float far{};
+		glm::vec3 eye{};
+		glm::vec3 center{};
+		glm::vec3 up{};
 	};
 
-	// TODO : object storage
-	// objects are stored somewhere... let it be some handle-object map
+	struct omnidir_light_t {
+		glm::vec3 ambient{};
+		glm::vec3 color{};
+		glm::vec3 pos{};
+	};
 
-	// TODO : collision resolution
+	struct vao_t {
+		std::shared_ptr<vertex_array_t> vao;
+	};
+
+	// giant abomination, yep, very cheap solution
+	// TODO : dismember?
+	struct object_t {
+		transform_t transform{};
+		physics_t physics{};
+		material_t material{};
+		attractor_t attractor{};
+		force_t force{};
+		camera_t camera{};
+		omnidir_light_t omnilight{};
+		vao_t vao{};
+	};
+
+	void sync_object_transform_physics(object_t& object) {
+		object.transform.translation = object.physics.pos;
+	}
+
+	// TODO : collision resolution (resolution of colliding spheres, resolution of overlapping spheres)
+
+	// TODO : entity spawner
+
+	// TODO : advanced physics
+	// TODO : grid update method
+	// TODO : multithreaded update
 
 	// TODO : advanced drawing
 	// TODO : G-buffer
@@ -1133,15 +1228,15 @@ void main() {
 	// TODO : instanced drawing
 	// TODO : create first pass : draw everything into the G-buffer
 	// TODO : create second pass : apply light
-
-	// TODO : advanced physics
-	// TODO : grid update method
-	// TODO : multithreaded update
 }
 
 int main() {
-	constexpr int window_width = 1280;
-	constexpr int window_height = 720;
+	constexpr int window_width = 400;
+	constexpr int window_height = 400;
+	constexpr int tex_width = 256;
+	constexpr int tex_height = 256;
+	constexpr int fbo_width = 300;
+	constexpr int fbo_height = 300;
 
 	glfw::guard_t glfw_guard;
 	glfw::window_t window(glfw::window_params_t::create_basic_opengl("yin-yang", window_width, window_height, 4, 6));
@@ -1158,9 +1253,6 @@ int main() {
 
 	bool show_demo_window = true;
 	{
-		constexpr int tex_width = 256;
-		constexpr int tex_height = 256;
-
 		glew_guard_t glew_guard;
 		demo_widget_t demo;
 		sim_widget_t sim;
@@ -1193,9 +1285,6 @@ int main() {
 			return std::make_shared<vertex_array_t>(gen_vertex_array_from_mesh(*sphere_mesh_ptr));
 		})();
 
-		constexpr int fbo_width = 800;
-		constexpr int fbo_height = 600;
-
 		auto fbo_color = ([&] () {
 			return std::make_shared<texture_t>(gen_empty_texture(fbo_width, fbo_height, Rgba32f));
 		})();
@@ -1216,9 +1305,10 @@ int main() {
 			glViewport(0, 0, fbo_width, fbo_height);
 		});
 
-		// model related params
-		object_t object = {
-			.transform {
+		handle_storage_t<object_t> objects;
+
+		handle_t ball0 = objects.add({
+			.transform = {
 				.base = glm::mat4(1.0f),
 				.scale = glm::vec3(1.0f), .rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f), .translation = glm::vec3(0.0f) 
 			},
@@ -1229,57 +1319,119 @@ int main() {
 			.material = {
 				.color = glm::vec3(0.0f, 1.0f, 0.0f), .specular_strength = 0.5f, .shininess = 32.0f,
 			}
-		};
+		});
 
-		// camera related params
-		glm::vec3 eye = glm::vec3(0.0f, 10.0f, 0.0f);
-		glm::vec3 center = glm::vec3(0.0f, 0.0f, 0.0f);
-		glm::vec3 up = glm::vec3(0.0f, 0.0f, 1.0f);
-		glm::mat4 v = glm::translate(glm::lookAt(eye, center, up), -eye);
-		glm::mat4 p = glm::perspective(glm::radians(45.0f), (float)fbo_width / fbo_height, 0.1f, 100.0f);
+		handle_t ball1 = objects.add({
+			.transform = {
+				.base = glm::mat4(1.0f),
+				.scale = glm::vec3(1.0f), .rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f), .translation = glm::vec3(0.0f) 
+			},
+			.physics = {
+				.pos = glm::vec3(0.0f, 0.0f, -5.0f),
+				.vel = glm::vec3(0.0f, 0.0f, 0.0f),
+			},
+			.material = {
+				.color = glm::vec3(0.0f, 0.0f, 1.0f), .specular_strength = 0.5f, .shininess = 32.0f,
+			}
+		});
 
-		// light related params
-		glm::vec3 ambient_color = glm::vec3(0.1f, 0.1f, 0.1f);
-		glm::vec3 light_color = glm::vec3(1.0f, 1.0f, 1.0f);
-		glm::vec3 light_pos = eye;
+		handle_t viewer = objects.add({
+			.camera = {
+				.fov = 45.0f, .aspect_ratio = (float)fbo_width / fbo_height, .near = 0.1f, .far = 100.0f,
+				.eye = glm::vec3(0.0, 10.0f, 0.0f),
+				.center = glm::vec3(0.0f, 0.0f, 0.0f),
+				.up = glm::vec3(0.0f, 0.0f, 1.0f)
+			}
+		});
+
+		handle_t light_source = objects.add({
+			.omnilight = {
+				.ambient = glm::vec3(0.1f, 0.1f, 0.1f),
+				.color = glm::vec3(1.0f, 1.0f, 1.0f),
+				.pos = glm::vec3(10.0f, 10.0f, 10.0f),
+			}
+		});
+
+		handle_t attractor0 = objects.add({
+			.transform = {
+				.base = glm::mat4(1.0f),
+				.scale = glm::vec3(0.5f),
+				.rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f),
+				.translation = glm::vec3(2.0f, 0.0f, 0.0f)
+			},
+			.material = { .color = glm::vec3(1.0f, 0.0f, 0.0f), .specular_strength = 0.5, .shininess = 32.0f },
+			.attractor = { .pos = glm::vec3(+2.0f, 0.0f, 0.0f), .gm = 30.0f, .min_dist = 0.1, .max_dist = 10.0f }
+		});
+
+		handle_t attractor1 = objects.add({
+			.transform = {
+				.base = glm::mat4(1.0f),
+				.scale = glm::vec3(0.5f),
+				.rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f),
+				.translation = glm::vec3(-2.0f, 0.0f, 0.0f)
+			},
+			.material = { .color = glm::vec3(1.0f, 0.0f, 0.0f), .specular_strength = 0.5, .shininess = 32.0f },
+			.attractor = { .pos = glm::vec3(-2.0f, 0.0f, 0.0f), .gm = 30.0f, .min_dist = 0.1, .max_dist = 10.0f }
+		});
+
+		std::unordered_set<handle_t> basic_renderables = {ball0, ball1, attractor0, attractor1};
 
 		basic_render_seq_t render_seq(program_ptr);
 		render_seq.set_general_setup([&] (shader_program_t& program) {
-			program.set_mat4("u_m", (glm::mat4)object.transform);
-			program.set_mat4("u_v", v);
-			program.set_mat4("u_p", p);
-			program.set_vec3("u_object_color", object.material.color);
-			program.set_float("u_shininess", object.material.shininess);
-			program.set_float("u_specular_strength", object.material.specular_strength);
-			program.set_vec3("u_ambient_color", ambient_color);
-			program.set_vec3("u_light_color", light_color);
-			program.set_vec3("u_light_pos", light_pos);
-			program.set_vec3("u_eye_pos", eye);
+			auto viewer_ptr = objects.get(viewer);
+			auto light_source_ptr = objects.get(light_source);
+			program.set_mat4("u_v", viewer_ptr->camera.get_view());
+			program.set_mat4("u_p", viewer_ptr->camera.get_proj());
+			program.set_vec3("u_ambient_color", light_source_ptr->omnilight.ambient);
+			program.set_vec3("u_light_color", light_source_ptr->omnilight.color);
+			program.set_vec3("u_light_pos", light_source_ptr->omnilight.pos);
+			program.set_vec3("u_eye_pos", viewer_ptr->camera.eye);
 		});
 
 		render_seq.add_draw_command(sphere_vao_ptr,
 			[&] (shader_program_t& program, vertex_array_t& vao) {
-				glDrawArrays(vao.mode, 0, vao.count);
+				for (auto handle : basic_renderables) {
+					auto& object = *objects.get(handle);
+					program.set_mat4("u_m", object.transform.to_mat4());
+					program.set_vec3("u_object_color", object.material.color);
+					program.set_float("u_shininess", object.material.shininess);
+					program.set_float("u_specular_strength", object.material.specular_strength);
+					glDrawArrays(vao.mode, 0, vao.count);
+				}
 			}
 		);
 
 		velocity_verlet_integrator_t vel_ver_int;
-		auto attractor0 = vel_ver_int.add_attractor({
-			.pos = glm::vec3(+2.0f, 0.0f, 0.0f), .gm = 30.0f, .min_dist = 0.1, .max_dist = 10.0f
-		});
-		auto attractor1 = vel_ver_int.add_attractor({
-			.pos = glm::vec3(-2.0f, 0.0f, 0.0f), .gm = 30.0f, .min_dist = 0.1, .max_dist = 10.0f
-		});
+		vel_ver_int.add_attractor(attractor0);
+		vel_ver_int.add_attractor(attractor1);
+		vel_ver_int.set_attractor_accessor([&] (handle_t handle) { return &objects.get(handle)->attractor; });
+		vel_ver_int.set_force_accessor([&] (handle_t handle) { return &objects.get(handle)->force; });
 
 		while (!window.should_close()) {
 			glfw::poll_events();
 
-			vel_ver_int.update(object.physics, 0.05f);
-			object.update();
+			// TODO : physics system
+			{
+				auto& object = *objects.get(ball0);
+				vel_ver_int.update(object.physics, 0.05f);
+				sync_object_transform_physics(object);
+			}
+			{
+				auto& object = *objects.get(ball1);
+				vel_ver_int.update(object.physics, 0.05f);
+				sync_object_transform_physics(object);
+			}
 
 			pass.execute_action([&] (framebuffer_t& fbo) {
 				render_seq.draw();
 			});
+
+			// TODO : default framebuffer setup
+			auto [w, h] = window.get_framebuffer_size();
+			glBindFramebuffer(GL_FRAMEBUFFER, 0);
+			glClearColor(0.2, 0.2, 0.2, 1.0);
+			glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+			glViewport(0, 0, w, h);
 
 			ImGui_ImplOpenGL3_NewFrame();
 			ImGui_ImplGlfw_NewFrame();
@@ -1290,13 +1442,6 @@ int main() {
 			framebuffer_widget.render(reinterpret_cast<ImTextureID>(fbo_color->id), fbo_color->width, fbo_color->height);
 
 			ImGui::Render();
-
-			// workaround
-			auto [w, h] = window.get_framebuffer_size();
-			glBindFramebuffer(GL_FRAMEBUFFER, 0);
-			glClearColor(1.0, 0.5, 0.25, 1.0);
-			glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
-			glViewport(0, 0, w, h);
 			ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
 			window.swap_buffers();
