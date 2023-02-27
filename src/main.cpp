@@ -1026,7 +1026,12 @@ void main() {
 	};
 
 	// velocity-verlet integrator
-	// TODO : rework, stores handles only + on init get fetcher object
+	struct body_state_t {
+		glm::vec3 pos{};
+		glm::vec3 vel{};
+		float mass{};
+	};
+
 	struct velocity_verlet_integrator_t {
 		using attractor_accessor_t = std::function<attractor_t*(handle_t)>;
 
@@ -1078,12 +1083,11 @@ void main() {
 		std::unordered_set<handle_t> force_handles;
 
 
-		template<class body_t>
-		force_t compute_force(body_t& body) const {
+		force_t compute_force(const body_state_t& state) const {
 			force_t total_force{};
 			for (auto handle : attractor_handles) {
 				auto& attractor = access_attractor(handle); // oh no, we're going to crash :D
-				glm::vec3 dr =  attractor.pos - body.pos;
+				glm::vec3 dr =  attractor.pos - state.pos;
 				float dr_mag = glm::length(dr);
 				float dr_mag2 = glm::dot(dr, dr);
 				if (attractor.min_dist <= dr_mag && dr_mag <= attractor.max_dist) {
@@ -1095,23 +1099,79 @@ void main() {
 			} return total_force;
 		}
 
-		template<class body_t>
-		void update(body_t& body, float dt) {
-			force_t f0 = compute_force(body);
-			glm::vec3 vel_tmp = body.vel + 0.5f * f0.dir * dt;
-			body.pos = body.pos + vel_tmp * dt;
-			force_t f1 = compute_force(body);
-			body.vel = vel_tmp + 0.5f * f1.dir * dt;
+		body_state_t update(const body_state_t& state, float dt) const {
+			body_state_t new_state = state;
+			force_t f0 = compute_force(state);
+			glm::vec3 vel_tmp = state.vel + 0.5f * f0.dir * dt;
+			new_state.pos = state.pos + vel_tmp * dt;
+			force_t f1 = compute_force(new_state);
+			new_state.vel = vel_tmp + 0.5f * f1.dir * dt;
+			return new_state;
 		}
+	};
+
+	template<class type_t, class = void>
+	struct is_integrator_t : std::false_type {};
+
+	template<class type_t>
+	struct is_integrator_t<type_t, 
+		std::enable_if_t<
+			std::is_invocable_r_v<force_t, decltype(&type_t::compute_force), const type_t*, const body_state_t&>
+			&& std::is_invocable_r_v<body_state_t, decltype(&type_t::update), const type_t*, const body_state_t&, float>
+		>> : std::true_type {};
+
+	template<class type_t>
+	inline constexpr bool is_integrator_v = is_integrator_t<type_t>::value;
+
+	struct integrator_proxy_t {
+		using compute_force_func_t = force_t(*)(void*, const body_state_t&);
+		using update_func_t = body_state_t(*)(void*, const body_state_t&, float);
+
+		template<class integrator_t>
+		integrator_proxy_t(integrator_t& integrator) noexcept {
+			*this = integrator;
+		}
+
+		template<classs integrator_t>
+		integrator_proxy_t& operator = (integrator_t& integrator) noexcept {
+			instance = &integrator;
+			compute_force_func = [] (void* inst, const body_state_t& state) {
+				return ((integrator_t*)inst)->compute_force(state);
+			};
+			update_func = [] (void* inst, const body_state_t& state, float dt) {
+				return ((integrator_t*)inst)->update(state, dt);
+			};
+			return *this;
+		}
+
+		integrator_proxy_t(const integrator_proxy_t&) = default;
+		integrator_proxy_t(integrator_proxy_t&&) noexcept = default;
+
+		~integrator_proxy_t() = default;
+
+		integrator_proxy_t& operator = (const integrator_proxy_t&) = default;
+		integrator_proxy_t& operator = (integrator_proxy_t&&) noexcept = default;
+
+		force_t compute_force(const body_state_t& state) const {
+			return compute_force_func(instance, state);
+		}
+
+		body_state_t update(const body_state_t& state, float dt) const {
+			return update_func(instance, state, dt);
+		}
+
+		void* instance{};
+		compute_force_func_t compute_force_func{};
+		update_func_t update_func{};
 	};
 
 	// center = r + t * v, t from [0, 1]
 	// returns t - time of the first contact
 	template<float eps = 1e-6>
-	std::optional<float> collide_moving_sphere_sphere(const glm::vec3& r0, const glm::vec3& v0, float rad0,
-									const glm::vec3& r1, const glm::vec3& v1, float rad1) {
+	std::optional<float> collide_moving_sphere_sphere(const glm::vec3& r0, const glm::vec3& dr0, float rad0,
+									const glm::vec3& r1, const glm::vec3& dr1, float rad1) {
 		glm::vec3 dr = r1 - r0;
-		glm::vec3 dv = v1 - v0;
+		glm::vec3 dv = dr1 - dr0; // yes, it will be called dv here but it is not velocity
 		float rad = rad0 + rad1;
 		float c = glm::dot(dr, dr) - rad * rad;
 		if (c < eps) {
@@ -1137,7 +1197,97 @@ void main() {
 		glm::vec3 r0t = r0 + t * v0;
 		glm::vec3 r1t = r1 + t * v1;
 		return rad0 * glm::normalize(r1t - r0t);
-	} 
+	}
+
+	struct physics_t {
+		glm::vec3 pos{};
+		glm::vec3 vel{};
+		float mass{};
+		float radius{};
+	};
+
+	struct collision_system_t {
+		using physics_accessor_t = std::function<physics_t*(handle_t)>;
+
+		template<class accessor_t>
+		void set_physics_accessor(accessor_t&& accessor) {
+			physics_accessor = std::forward<accessor_t>(accessor);
+		}
+
+		physics_t& access_physics(handle_t handle) {
+			return *physics_accessor(handle);
+		}
+
+		template<class integrator_t>
+		void set_integrator(integrator_t& _integrator) {
+			integrator = _integrator;
+		}
+
+		void rebuild_index_to_handle_map() {
+			index_to_handle.clear();
+			for (auto& handle : objects) {
+				index_to_handle.push_back(handle);
+			}
+		}
+
+		void rebuild_collision_matrix() {
+			collision_matrix.resize(objects.size());
+			for (auto& line : collision_matrix) {
+				line.resize(objects.size());
+				for (auto& value : line) {
+					value = -1.0f;
+				}
+			}
+		}
+
+		void get_integrator_updates(float dt) {
+			integrator_update.clear();
+			for (auto handle : index_to_handle) {
+				auto& physics = physics_accessor(handle);
+				body_state_t state = {physics.pos, physics.vel, physics.mass};
+				body_state_t new_state = integrator.update(state, dt);
+				// TODO : apply limitations
+				integrator_updates.push_back(new_state);
+			}
+		}
+
+		void compute_collision_matrix() {
+			for (int i = 0; i < objects.size(); i++) {
+				auto& body_i = access_physics(index_to_handle[i]);
+				auto& updated_i = integrator_updates[i];
+				for (int j = i + 1; j < objects.size(); j++) {
+					auto& body_j = access_physics(index_to_handle[j]);
+					auto& updated_j = integrator_updates[j];
+					auto t = collide_moving_sphere_sphere(
+						body_i.pos, updated_i.pos - body_i.pos, body_i.radius,
+						body_j.pos, updated_j.pos - body_j.pos, body_j.radius);
+					collision_matrix[i][j] = t.value_or(-1.0f);
+					collision_matrix[j][i] = t.value_or(-1.0f);
+				}
+			}
+		}
+
+		void resolve_collisions() {
+			// TODO
+		}
+
+		void update(float dt) {
+			rebuild_index_to_handle_map();
+			rebuild_collision_matrix();
+			get_integrator_updates(dt);
+			compute_collision_matrix();
+			// TODO : apply some physics
+		}
+
+		float movement_limit{};
+		float velocity_limit{};
+		physics_accessor_t physics_accessor;
+		integrator_proxy_t integrator;
+		std::unordered_set<handle_t> objects;
+		std::vector<body_state_t> integrator_updates;
+		std::vector<handle_t> index_to_handle;
+		std::vector<std::vector<float>> collision_matrix;
+	};
 
 	struct transform_t {
 		glm::mat4 to_mat4() const {
@@ -1151,13 +1301,6 @@ void main() {
 		glm::vec3 scale{};
 		glm::quat rotation{};
 		glm::vec3 translation{};
-	};
-
-	struct physics_t {
-		glm::vec3 pos{};
-		glm::vec3 vel{};
-		float mass{};
-		float radius{};
 	};
 
 	struct material_t {
