@@ -1165,33 +1165,41 @@ void main() {
 		update_func_t update_func{};
 	};
 
+	struct physics_t {
+		glm::vec3 pos{};
+		glm::vec3 vel{};
+		glm::vec3 impulse{};
+		float mass{};
+		float radius{};
+	};
+
 	// center = r + t * v, t from [0, 1]
 	// returns t - time of the first contact
-	template<float eps = 1e-6>
+	template<float _eps = 1e-6>
 	std::optional<float> collide_moving_sphere_sphere(const glm::vec3& r0, const glm::vec3& dr0, float rad0,
 									const glm::vec3& r1, const glm::vec3& dr1, float rad1) {
 		glm::vec3 dr = r1 - r0;
 		glm::vec3 dv = dr1 - dr0; // yes, it will be called dv here but it is not velocity
 		float rad = rad0 + rad1;
 		float c = glm::dot(dr, dr) - rad * rad;
-		if (c < eps) {
+		if (c < 0.0f) {
 			return 0.0f;
 		}
 		float a = glm::dot(dv, dv);
-		if (a < eps) {
+		if (a < _eps) {
 			return std::nullopt;
 		}
 		float b = glm::dot(dr, dv);
-		if (b > eps) {
+		if (b > _eps) {
 			return std::nullopt;
 		}
 		float d = b * b - a * c;
-		if (d < eps) {
+		if (d < _eps) {
 			return std::nullopt;
 		} return (-b - std::sqrt(d)) / a;
 	}
 
-	template<float eps = 1e-6>
+	template<float _eps = 1e-6>
 	glm::vec3 get_sphere_sphere_contact(const glm::vec3& r0, const glm::vec3& v0,
 									const glm::vec3& r1, const glm::vec3& v1, float rad0, float t) {
 		glm::vec3 r0t = r0 + t * v0;
@@ -1199,12 +1207,62 @@ void main() {
 		return rad0 * glm::normalize(r1t - r0t);
 	}
 
-	struct physics_t {
-		glm::vec3 pos{};
-		glm::vec3 vel{};
-		float mass{};
-		float radius{};
+	// TODO : robustness, what if two spheres are concentric?
+
+	// r - distance between objects
+	// r0 - radius (proj) of the first object
+	// r1 - radius (proj) of the second object 
+	// a - first point of overlap segment
+	// b - second point of overlap segment
+	// c - center of the second object
+	struct overlap_t {
+		float r{}, r0{}, r1{}, a{}, b{};
 	};
+
+	template<class _eps = 1e-6>
+	std::optional<overlap_t> get_sphere_sphere_overlap(const glm::vec3& r0, float rad0, const glm::vec3& r1, float rad1) {
+		glm::vec3 dr = r1 - r0;
+		float rr = glm::dot(dr, dr);
+		if (rr - (rad0 + rad1) * (rad0 + rad1) > 0.0) {
+			return std::nullopt;
+		}
+		float r = std::sqrt(rr);
+		float a = std::max(-rad0, r - rad1);
+		float b = std::min(+rad0, r + rad1);
+		return overlap_t{r, rad0, rad1, a, b};
+	}
+
+	struct resolved_t {
+		glm::vec3 mv1{};
+		glm::vec3 mv2{};
+	};
+
+	template<class _eps, class coefs_t>
+	resolved_t get_overlap_movements(const physics_t& body0, const physics_t& body1, const overlap_t& overlap,
+								float coef, float damp, coefs_t coefs) {
+		glm::vec3 dr = (body1.pos - body0.pos) / (overlap.r + damp);
+		float mv = (overlap.b - overlap.a) * coef * 0.5f;
+		auto [mv0, mv1] = coefs(body0, body1, overlap, mv);
+		return {dr * mv0, dr * mv1};
+	}
+
+	template<class _eps = 1e-6>
+	resolved_t get_overlap_movements_overlap(const physics_t& body0, const physics_t& body1, const overlap_t& overlap, float coef, float damp) {
+		return get_overlap_movements<_eps>(body0, body1, overlap, coef, damp, [] (auto& body0, auto& body1, auto& overlap, float mv) {
+			float mv0 = -mv * overlap.r0 / (overlap.r0 + overlap.r1);
+			float mv1 = +mv * overlap.r1 / (overlap.r0 + overlap.r1);
+			return {mv0, mv1};
+		});
+	}
+
+	template<class _eps = 1e-6>
+	resolved_t get_overlap_movements_mass(const physics_t& body0, const physics_t& body1, const overlap_t& overlap, float coef, float damp) {
+		return get_overlap_movements<_eps>(body0, body1, overlap, coef, damp, [] (auto& body0, auto& body1, auto& overlap, float mv) {
+			float mv0 = -mv * body1.mass / (body0.mass + body1.mass);
+			float mv1 = +mv * body0.mass / (body0.mass + body1.mass);
+			return {mv0, mv1};
+		});
+	}
 
 	struct collision_system_t {
 		using physics_accessor_t = std::function<physics_t*(handle_t)>;
@@ -1230,14 +1288,73 @@ void main() {
 			}
 		}
 
+		void resolve_overlaps() {
+			overlap_matrix.resize(objects.size());
+			for (auto& line : overlap_matrix) {
+				overlap_matrix.resize(objects.size());
+			}			
+
+			auto overlap_pass = [&] (float coef, float damp) {
+				overlap_movement.clear();
+				overlap_movement.resize(objects.size(), glm::vec3(0.0f));
+				for (int i = 0; i < objects.size(); i++) {
+					auto& body_i = access_physics(index_to_handle[i]);
+					for (int j = i + 1; j < objects.size(); j++) {
+						auto& body_j = access_physics(index_to_handle[j]);
+						auto overlap = get_sphere_sphere_overlap_mass(body_i.pos, body_i.radius, body_j.pos, body_j.radius);
+						if (!overlap) {
+							continue;
+						}
+						auto [mvi, mvj] = get_overlap_movements(body_i.pos, body_j.pos, *overlap, overlap_coef, overlap_damp);
+						overlap_movement[i] += mvi;
+						overlap_movement[j] += mvj;
+					}
+				}
+			};
+
+			auto movement_norm = [&] () {
+				glm::vec3 accum = glm::vec3(0.0f);
+				for (auto& mv : overlap_movement) {
+					accum += glm::abs(mv);
+				} return accum.x + accum.y + accum.y;
+			};
+
+			bool no_movements = false;
+			for (int i = 0; i < overlap_resolution_iters; i++) {
+				overlap_pass(overlap_coef, overlap_damp);
+				for (int i = 0; i < objects.size(); i++) {
+					auto& body = access_physics(index_to_handle[i]);
+					body.pos += overlap_movement[i];
+				} if (movement_norm() < overlap_thresh) {
+					no_movements = true;
+					break;
+				}
+			} if (no_movements) {
+				return;
+			}
+
+			// TODO : add impulse to overlapping spheres
+			overlap_pass(1.0f, overlap_damp);
+			
+		}
+
 		void rebuild_collision_matrix() {
+			first_collision.clear();
+			first_collision.resize(objects.size(), 2.0f);
+
 			collision_matrix.resize(objects.size());
 			for (auto& line : collision_matrix) {
 				line.resize(objects.size());
 				for (auto& value : line) {
-					value = -1.0f;
+					value = 2.0f;
 				}
 			}
+		}
+
+		glm::vec3 limit_vec(const glm::vec3& vec, float max_len) {
+			if (float len = glm::length(vec); len > max_len) {
+				return vec * (max_len / len);
+			} return vec;
 		}
 
 		void get_integrator_updates(float dt) {
@@ -1246,7 +1363,8 @@ void main() {
 				auto& physics = physics_accessor(handle);
 				body_state_t state = {physics.pos, physics.vel, physics.mass};
 				body_state_t new_state = integrator.update(state, dt);
-				// TODO : apply limitations
+				new_state.pos = state.pos + limit_vec(new_state.pos - state.pos, movement_limit);
+				new_state.vel = limit_vec(new_state.vel, velocity_limit);
 				integrator_updates.push_back(new_state);
 			}
 		}
@@ -1258,27 +1376,35 @@ void main() {
 				for (int j = i + 1; j < objects.size(); j++) {
 					auto& body_j = access_physics(index_to_handle[j]);
 					auto& updated_j = integrator_updates[j];
-					auto t = collide_moving_sphere_sphere(
-						body_i.pos, updated_i.pos - body_i.pos, body_i.radius,
-						body_j.pos, updated_j.pos - body_j.pos, body_j.radius);
-					collision_matrix[i][j] = t.value_or(-1.0f);
-					collision_matrix[j][i] = t.value_or(-1.0f);
+					float t = std::min(collide_moving_sphere_sphere(
+								body_i.pos, updated_i.pos - body_i.pos, body_i.radius,
+								body_j.pos, updated_j.pos - body_j.pos, body_j.radius).value_or(2.0f), 2.0f);
+					collision_matrix[i][j] = t;
+					collision_matrix[j][i] = t;
+					first_collision[i] = std::min(first_collision[i], t);
 				}
 			}
 		}
 
 		void resolve_collisions() {
-			// TODO
+			for (int i = 0; i < objects.size(); i++) {
+
+			}
 		}
 
 		void update(float dt) {
 			rebuild_index_to_handle_map();
+			resolve_overlaps();
 			rebuild_collision_matrix();
 			get_integrator_updates(dt);
 			compute_collision_matrix();
 			// TODO : apply some physics
 		}
 
+		float overlap_coef{};
+		float overlap_damp{};
+		float overlap_thresh{};
+		int overlap_resolution_iters{};
 		float movement_limit{};
 		float velocity_limit{};
 		physics_accessor_t physics_accessor;
@@ -1286,7 +1412,9 @@ void main() {
 		std::unordered_set<handle_t> objects;
 		std::vector<body_state_t> integrator_updates;
 		std::vector<handle_t> index_to_handle;
-		std::vector<std::vector<float>> collision_matrix;
+		std::vector<glm::vec3> overlap_movement;
+		std::vector<float> first_collision;
+		std::vector<std::vector<float>> collision_matrix; // values from [0, 1], t = 2.0 means no collision
 	};
 
 	struct transform_t {
