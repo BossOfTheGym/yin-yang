@@ -1029,7 +1029,16 @@ void main() {
 	struct body_state_t {
 		glm::vec3 pos{};
 		glm::vec3 vel{};
+		glm::vec3 force{};
 		float mass{};
+	};
+
+	struct physics_t {
+		glm::vec3 pos{};
+		glm::vec3 vel{};
+		glm::vec3 force{};
+		float mass{};
+		float radius{};
 	};
 
 	struct velocity_verlet_integrator_t {
@@ -1084,7 +1093,7 @@ void main() {
 
 
 		force_t compute_force(const body_state_t& state) const {
-			force_t total_force{};
+			force_t total_force{state.force / state.mass};
 			for (auto handle : attractor_handles) {
 				auto& attractor = access_attractor(handle); // oh no, we're going to crash :D
 				glm::vec3 dr =  attractor.pos - state.pos;
@@ -1165,14 +1174,6 @@ void main() {
 		update_func_t update_func{};
 	};
 
-	struct physics_t {
-		glm::vec3 pos{};
-		glm::vec3 vel{};
-		glm::vec3 impulse{};
-		float mass{};
-		float radius{};
-	};
-
 	// center = r + t * v, t from [0, 1]
 	// returns t - time of the first contact
 	template<float _eps = 1e-6>
@@ -1214,7 +1215,6 @@ void main() {
 	// r1 - radius (proj) of the second object 
 	// a - first point of overlap segment
 	// b - second point of overlap segment
-	// c - center of the second object
 	struct overlap_t {
 		float r{}, r0{}, r1{}, a{}, b{};
 	};
@@ -1226,7 +1226,7 @@ void main() {
 		if (rr - (rad0 + rad1) * (rad0 + rad1) > 0.0) {
 			return std::nullopt;
 		}
-		float r = std::sqrt(rr);
+		float r = std::sqrt(rr) + _eps; // attempt to mitigate zero-length problem
 		float a = std::max(-rad0, r - rad1);
 		float b = std::min(+rad0, r + rad1);
 		return overlap_t{r, rad0, rad1, a, b};
@@ -1264,7 +1264,8 @@ void main() {
 		});
 	}
 
-	struct collision_system_t {
+	// TODO : split up
+	struct physics_system_t {
 		using physics_accessor_t = std::function<physics_t*(handle_t)>;
 
 		template<class accessor_t>
@@ -1289,72 +1290,72 @@ void main() {
 		}
 
 		void resolve_overlaps() {
-			overlap_matrix.resize(objects.size());
-			for (auto& line : overlap_matrix) {
+			for (int i = 0; i < overlap_resolution_iters; i++) {
 				overlap_matrix.resize(objects.size());
-			}			
+				for (auto& line : overlap_matrix) {
+					overlap_matrix.resize(objects.size(), std::nullopt);
+				}
 
-			auto overlap_pass = [&] (float coef, float damp) {
 				overlap_movement.clear();
 				overlap_movement.resize(objects.size(), glm::vec3(0.0f));
 				for (int i = 0; i < objects.size(); i++) {
 					auto& body_i = access_physics(index_to_handle[i]);
 					for (int j = i + 1; j < objects.size(); j++) {
 						auto& body_j = access_physics(index_to_handle[j]);
-						auto overlap = get_sphere_sphere_overlap_mass(body_i.pos, body_i.radius, body_j.pos, body_j.radius);
-						if (!overlap) {
+						auto overlap_opt = get_sphere_sphere_overlap_mass(body_i.pos, body_i.radius, body_j.pos, body_j.radius);
+						overlap_matrix[i][j] = overlap_opt;
+						if (!overlap_opt) {
 							continue;
 						}
-						auto [mvi, mvj] = get_overlap_movements(body_i.pos, body_j.pos, *overlap, overlap_coef, overlap_damp);
+						auto [mvi, mvj] = get_overlap_movements(body_i.pos, body_j.pos, *overlap_opt, overlap_coef, overlap_damp);
 						overlap_movement[i] += mvi;
 						overlap_movement[j] += mvj;
 					}
 				}
-			};
 
-			auto movement_norm = [&] () {
+				for (int i = 0; i < objects.size(); i++) {
+					access_physics(index_to_handle[i]).pos += overlap_movement[i];
+				}
+
 				glm::vec3 accum = glm::vec3(0.0f);
 				for (auto& mv : overlap_movement) {
 					accum += glm::abs(mv);
-				} return accum.x + accum.y + accum.y;
-			};
-
-			bool no_movements = false;
-			for (int i = 0; i < overlap_resolution_iters; i++) {
-				overlap_pass(overlap_coef, overlap_damp);
-				for (int i = 0; i < objects.size(); i++) {
-					auto& body = access_physics(index_to_handle[i]);
-					body.pos += overlap_movement[i];
-				} if (movement_norm() < overlap_thresh) {
-					no_movements = true;
-					break;
+				} if (accum.x + accum.y + accum.y < overlap_thresh) {
+					return; // no more movements
 				}
-			} if (no_movements) {
-				return;
 			}
 
-			// TODO : add impulse to overlapping spheres
-			overlap_pass(1.0f, overlap_damp);
-			
-		}
-
-		void rebuild_collision_matrix() {
-			first_collision.clear();
-			first_collision.resize(objects.size(), 2.0f);
-
-			collision_matrix.resize(objects.size());
-			for (auto& line : collision_matrix) {
-				line.resize(objects.size());
-				for (auto& value : line) {
-					value = 2.0f;
+			// TODO : do I really need this
+			for (int i = 0; i < objects.size(); i++) {
+				auto& body_i = access_physics(index_to_handle[i]);
+				for (int j = i + 1; j < objects.size(); j++) {
+					auto& body_j = access_physics(index_to_handle[j]);
+					auto& overlap_opt = overlap_matrix[i][j];
+					if (!overlap_opt) {
+						continue;
+					}
+					// spring model
+					overlap_t overlap = *overlap_opt;
+					float base_length = body_i.radius + body_j.radius;
+					float curr_length = overlap.r;
+					float k = overlap_spring_coef * (curr_length - base_length);
+					glm::vec3 dr = (body_j.pos - body_i.pos) / overlap.r;
+					body_i.force += k * dr;
+					body_j.force += -k * dr;
 				}
 			}
 		}
 
-		glm::vec3 limit_vec(const glm::vec3& vec, float max_len) {
+		static constexpr float no_collision = 2.0f;
+
+		glm::vec3 limit_vec(const glm::vec3& vec, float max_len) const {
 			if (float len = glm::length(vec); len > max_len) {
 				return vec * (max_len / len);
 			} return vec;
+		}
+
+		glm::vec3 limit_movement(const glm::vec3& r0, const glm::vec3& r1, float max_len) const {
+			return r0 + limit_vec(r1 - r0, max_len);
 		}
 
 		void get_integrator_updates(float dt) {
@@ -1363,58 +1364,88 @@ void main() {
 				auto& physics = physics_accessor(handle);
 				body_state_t state = {physics.pos, physics.vel, physics.mass};
 				body_state_t new_state = integrator.update(state, dt);
-				new_state.pos = state.pos + limit_vec(new_state.pos - state.pos, movement_limit);
+				new_state.pos = limit_movement(state.pos, new_state.pos, movement_limit);
 				new_state.vel = limit_vec(new_state.vel, velocity_limit);
 				integrator_updates.push_back(new_state);
 			}
 		}
 
-		void compute_collision_matrix() {
+		// we also apply here some physics
+		// we will ignore t = 0
+		void resolve_collisions() {
+			first_collision.clear();
+			first_collision.resize(objects.size(), no_collision);
+			
+			collision_matrix.resize(objects.size());
+			for (auto& line : collision_matrix) {
+				line.resize(objects.size());
+				for (auto& value : line) {
+					value = no_collision;
+				}
+			}
+			
 			for (int i = 0; i < objects.size(); i++) {
 				auto& body_i = access_physics(index_to_handle[i]);
 				auto& updated_i = integrator_updates[i];
 				for (int j = i + 1; j < objects.size(); j++) {
 					auto& body_j = access_physics(index_to_handle[j]);
 					auto& updated_j = integrator_updates[j];
-					float t = std::min(collide_moving_sphere_sphere(
-								body_i.pos, updated_i.pos - body_i.pos, body_i.radius,
-								body_j.pos, updated_j.pos - body_j.pos, body_j.radius).value_or(2.0f), 2.0f);
+					float t = collide_moving_sphere_sphere(body_i.pos, updated_i.pos - body_i.pos, body_i.radius,
+								body_j.pos, updated_j.pos - body_j.pos, body_j.radius).value_or(no_collision);
 					collision_matrix[i][j] = t;
 					collision_matrix[j][i] = t;
-					first_collision[i] = std::min(first_collision[i], t);
-				}
+				} first_collision[i] = *std::min_element(collision_matrix[i].begin(), collision_matrix.end());
 			}
-		}
 
-		void resolve_collisions() {
 			for (int i = 0; i < objects.size(); i++) {
+				for (int j = i + 1; j < objects.size(); j++) {
+					if (first_collision[j] < collision_matrix[i][j]) {
+						collision_matrix[i][j] = no_collision;
+						collision_matrix[j][i] = no_collision;
+					}
+				} first_collision[i] = *std::min_element(collision_matrix[i].begin(), collision_matrix.end());
+			}
 
+			for (int i = 0; i < objects.size(); i++) {
+				auto& physics = access_physics(index_to_handle[i]);
+				auto& updated = integrator_updates[i];
+				physics.pos += first_collision[i] * (updated.pos - physics.pos);
+				physics.vel = updated.vel;
+				physics.force = 0.0f;
+			}
+
+			for (int i = 0; i < objects.size(); i++) {
+				for (int j = i + 1; j < objects.size(); j++) {
+
+				}
 			}
 		}
 
 		void update(float dt) {
 			rebuild_index_to_handle_map();
 			resolve_overlaps();
-			rebuild_collision_matrix();
 			get_integrator_updates(dt);
-			compute_collision_matrix();
-			// TODO : apply some physics
+			resolve_collisions();
 		}
 
 		float overlap_coef{};
 		float overlap_damp{};
 		float overlap_thresh{};
+		float overlap_spring_coef{};
 		int overlap_resolution_iters{};
+		std::vector<glm::vec3> overlap_movement;
+		std::vector<std::vector<std::optional<overlap_t>>> overlap_matrix;
+
 		float movement_limit{};
 		float velocity_limit{};
-		physics_accessor_t physics_accessor;
 		integrator_proxy_t integrator;
+
+		physics_accessor_t physics_accessor;
 		std::unordered_set<handle_t> objects;
-		std::vector<body_state_t> integrator_updates;
 		std::vector<handle_t> index_to_handle;
-		std::vector<glm::vec3> overlap_movement;
+		std::vector<body_state_t> integrator_updates;
 		std::vector<float> first_collision;
-		std::vector<std::vector<float>> collision_matrix; // values from [0, 1], t = 2.0 means no collision
+		std::vector<std::vector<float>> collision_matrix; // values from [0, 1]
 	};
 
 	struct transform_t {
