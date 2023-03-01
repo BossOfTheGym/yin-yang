@@ -1371,7 +1371,6 @@ void main() {
 		}
 
 		// we also apply here some physics
-		// we will ignore t = 0
 		void resolve_collisions() {
 			first_collision.clear();
 			first_collision.resize(objects.size(), no_collision);
@@ -1414,9 +1413,13 @@ void main() {
 				physics.force = 0.0f;
 			}
 
+			// TODO : resolve impulses on collisions
 			for (int i = 0; i < objects.size(); i++) {
 				for (int j = i + 1; j < objects.size(); j++) {
-
+					// TODO : create matrix
+					// TODO : consider each case as a case of two bodies
+					// TODO : at the end update using formula:
+					// resolved_vel = sum resolved_vel_i * m_i / M, where M = sum m_i
 				}
 			}
 		}
