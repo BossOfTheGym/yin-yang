@@ -1468,106 +1468,107 @@ void main() {
 		// we also apply here some physics
 		// we will ignore t = 0
 		void resolve_collisions() {
-			first_collision.clear();
-			first_collision.resize(objects.size(), no_collision);
+			// first_collision.clear();
+			// first_collision.resize(objects.size(), no_collision);
 			
-			collision_matrix.resize(objects.size());
-			for (auto& line : collision_matrix) {
-				line.clear();
-				line.resize(objects.size(), no_collision);
-			}
+			// collision_matrix.resize(objects.size());
+			// for (auto& line : collision_matrix) {
+			// 	line.clear();
+			// 	line.resize(objects.size(), no_collision);
+			// }
 			
-			for (int i = 0; i < objects.size(); i++) {
-				auto& body_i = access_object(index_to_handle[i]).physics;
-				auto& updated_i = integrator_updates[i];
-				for (int j = i + 1; j < objects.size(); j++) {
-					auto& body_j = access_object(index_to_handle[j]).physics;
-					auto& updated_j = integrator_updates[j];
-					float t = collide_moving_sphere_sphere(body_i.pos, updated_i.pos - body_i.pos, body_i.radius,
-								body_j.pos, updated_j.pos - body_j.pos, body_j.radius, eps).value_or(no_collision);
-					collision_matrix[i][j] = t;
-					collision_matrix[j][i] = t;
-				} first_collision[i] = *std::min_element(collision_matrix[i].begin(), collision_matrix[i].end());
-			}
+			// for (int i = 0; i < objects.size(); i++) {
+			// 	auto& body_i = access_object(index_to_handle[i]).physics;
+			// 	auto& updated_i = integrator_updates[i];
+			// 	for (int j = i + 1; j < objects.size(); j++) {
+			// 		auto& body_j = access_object(index_to_handle[j]).physics;
+			// 		auto& updated_j = integrator_updates[j];
+			// 		float t = collide_moving_sphere_sphere(body_i.pos, updated_i.pos - body_i.pos, body_i.radius,
+			// 					body_j.pos, updated_j.pos - body_j.pos, body_j.radius, eps).value_or(no_collision);
+			// 		collision_matrix[i][j] = t;
+			// 		collision_matrix[j][i] = t;
+			// 	} first_collision[i] = *std::min_element(collision_matrix[i].begin(), collision_matrix[i].end());
+			// }
 
-			for (int i = 0; i < objects.size(); i++) {
-				for (int j = i + 1; j < objects.size(); j++) {
-					if (first_collision[j] < collision_matrix[i][j]) {
-						collision_matrix[i][j] = no_collision;
-						collision_matrix[j][i] = no_collision;
-					}
-				} first_collision[i] = *std::min_element(collision_matrix[i].begin(), collision_matrix[i].end());
-			}
+			// for (int i = 0; i < objects.size(); i++) {
+			// 	for (int j = i + 1; j < objects.size(); j++) {
+			// 		if (first_collision[j] < collision_matrix[i][j]) {
+			// 			collision_matrix[i][j] = no_collision;
+			// 			collision_matrix[j][i] = no_collision;
+			// 		}
+			// 	} first_collision[i] = *std::min_element(collision_matrix[i].begin(), collision_matrix[i].end());
+			// }
 
 			for (int i = 0; i < objects.size(); i++) {
 				auto& physics = access_object(index_to_handle[i]).physics;
 				auto& updated = integrator_updates[i];
-				physics.pos += first_collision[i] * (updated.pos - physics.pos);
+				//physics.pos += first_collision[i] * (updated.pos - physics.pos);
+				physics.pos = updated.pos;
 				physics.vel = updated.vel;
 				physics.force = glm::vec3(0.0f);
 			}
 
-			resolved_impulses.resize(objects.size());
-			for (auto& line : resolved_impulses) {
-				line.clear();
-				line.resize(objects.size(), {});
-			}
+			// resolved_impulses.resize(objects.size());
+			// for (auto& line : resolved_impulses) {
+			// 	line.clear();
+			// 	line.resize(objects.size(), {});
+			// }
 			
+			// for (int i = 0; i < objects.size(); i++) {
+			// 	auto& body_i = access_object(index_to_handle[i]).physics;
+			// 	for (int j = i + 1; j < objects.size(); j++) {
+			// 		auto& body_j = access_object(index_to_handle[j]).physics;
+			// 		if (collision_matrix[i][j] == no_collision || std::abs(collision_matrix[i][j] - first_collision[i]) > eps) {
+			// 			continue;
+			// 		}
+
+			// 		// axes we project our velocities on
+			// 		glm::vec3 n = body_j.pos - body_i.pos;
+			// 		if (float len = glm::length(n); len > eps) {
+			// 			n /= len;
+			// 		} else {
+			// 			continue;
+			// 		}
+
+			// 		glm::vec3 u1{};
+			// 		glm::vec3 u2{};
+			// 		if (float vi_len = glm::length(body_i.vel); vi_len > eps) {
+			// 			u1 = glm::normalize(glm::cross(n, body_i.vel / vi_len));
+			// 			u2 = glm::normalize(glm::cross(n, u1));
+			// 		} else if (float vj_len = glm::length(body_j.vel); vj_len > eps) {
+			// 			u1 = glm::normalize(glm::cross(n, body_j.vel / vj_len));
+			// 			u2 = glm::normalize(glm::cross(n, u1));
+			// 		} else {
+			// 			continue;
+			// 		}
+
+			// 		// compute impulse change
+			// 		glm::vec3 dv = body_j.vel - body_i.vel;
+			// 		float m = body_i.mass + body_j.mass;
+			// 		float dvn = glm::dot(dv, n);
+			// 		float vin = glm::dot(body_i.vel, n) + 2.0f * dvn * (body_j.mass / m);
+			// 		float vjn = glm::dot(body_j.vel, n) - 2.0f * dvn * (body_i.mass / m);
+			// 		glm::vec3 vi = vin * n + glm::dot(body_i.vel, u1) * u1 + glm::dot(body_i.vel, u2) * u2;
+			// 		glm::vec3 vj = vjn * n + glm::dot(body_j.vel, u1) * u1 + glm::dot(body_j.vel, u2) * u2;
+
+			// 		resolved_impulses[i][j] = {vi, body_j.mass};
+			// 		resolved_impulses[j][i] = {vj, body_i.mass};
+			// 	}
+			// }
+
 			for (int i = 0; i < objects.size(); i++) {
-				auto& body_i = access_object(index_to_handle[i]).physics;
-				for (int j = i + 1; j < objects.size(); j++) {
-					auto& body_j = access_object(index_to_handle[j]).physics;
-					if (collision_matrix[i][j] == no_collision || std::abs(collision_matrix[i][j] - first_collision[i]) > eps) {
-						continue;
-					}
-
-					// axes we project our velocities on
-					glm::vec3 n = body_j.pos - body_i.pos;
-					if (float len = glm::length(n); len > eps) {
-						n /= len;
-					} else {
-						continue;
-					}
-
-					glm::vec3 u1{};
-					glm::vec3 u2{};
-					if (float vi_len = glm::length(body_i.vel); vi_len > eps) {
-						u1 = glm::normalize(glm::cross(n, body_i.vel / vi_len));
-						u2 = glm::normalize(glm::cross(n, u1));
-					} else if (float vj_len = glm::length(body_j.vel); vj_len > eps) {
-						u1 = glm::normalize(glm::cross(n, body_j.vel / vj_len));
-						u2 = glm::normalize(glm::cross(n, u1));
-					} else {
-						continue;
-					}
-
-					// compute impulse change
-					glm::vec3 dv = body_j.vel - body_i.vel;
-					float m = body_i.mass + body_j.mass;
-					float dvn = glm::dot(dv, n);
-					float vin = glm::dot(body_i.vel, n) + 2.0f * dvn * (body_j.mass / m);
-					float vjn = glm::dot(body_j.vel, n) - 2.0f * dvn * (body_i.mass / m);
-					glm::vec3 vi = vin * n + glm::dot(body_i.vel, u1) * u1 + glm::dot(body_i.vel, u2) * u2;
-					glm::vec3 vj = vjn * n + glm::dot(body_j.vel, u1) * u1 + glm::dot(body_j.vel, u2) * u2;
-
-					resolved_impulses[i][j] = {vi, body_j.mass};
-					resolved_impulses[j][i] = {vj, body_i.mass};
-				}
-			}
-
-			for (int i = 0; i < objects.size(); i++) {
-				float m = std::accumulate(resolved_impulses[i].begin(), resolved_impulses[i].end(), 0.0f,
-					[&] (const auto& acc, const auto& data) {
-						return acc + data.affecting_mass;
-					}
-				);
-				glm::vec3 v = std::accumulate(resolved_impulses[i].begin(), resolved_impulses[i].end(), glm::vec3(0.0f),
-					[&] (const auto& acc, const auto& data) {
-						return acc + data.resolved_velocity * (data.affecting_mass / m);
-					}
-				);
+				// float m = std::accumulate(resolved_impulses[i].begin(), resolved_impulses[i].end(), 0.0f,
+				// 	[&] (const auto& acc, const auto& data) {
+				// 		return acc + data.affecting_mass;
+				// 	}
+				// );
+				// glm::vec3 v = std::accumulate(resolved_impulses[i].begin(), resolved_impulses[i].end(), glm::vec3(0.0f),
+				// 	[&] (const auto& acc, const auto& data) {
+				// 		return acc + data.resolved_velocity * (data.affecting_mass / m);
+				// 	}
+				// );
 				auto& object = access_object(index_to_handle[i]);
-				object.physics.vel = v;
+				// object.physics.vel = v;
 				sync_object_transform_physics(object);
 			}
 		}
@@ -1575,7 +1576,7 @@ void main() {
 	public:
 		void update(float dt) {
 			rebuild_index_to_handle_map();
-			resolve_overlaps();
+			//resolve_overlaps();
 			get_integrator_updates(dt);
 			resolve_collisions();
 		}
