@@ -16,6 +16,7 @@
 #include <cstddef>
 #include <variant>
 #include <optional>
+#include <sstream>
 #include <iostream>
 #include <exception>
 #include <stdexcept>
@@ -292,7 +293,7 @@ namespace {
 	// sphere: radius(r), inclination(theta, from Oy), azimuth(phi, from Ox)
 	// (1, pi/2, 0) -> (1, 0, 0)
 	// (1, pi/2, pi/2) -> (0, 0, 1)
-	constexpr glm::vec3 sphere_to_cartesian(const glm::vec3& coords) {
+	glm::vec3 sphere_to_cartesian(const glm::vec3& coords) {
 		float r = coords.x;
 		float cos_the = std::cos(coords.y), sin_the = std::sin(coords.y);
 		float cos_phi = std::cos(coords.z), sin_phi = std::sin(coords.z);
@@ -302,10 +303,10 @@ namespace {
 	mesh_t gen_sphere_mesh(int subdiv = 0) {
 		assert(subdiv >= 0);
 
-		constexpr float pi = 3.14159265359;
-		constexpr float angle = std::atan(0.5);
-		constexpr float north_the = pi / 2.0 - angle;
-		constexpr float south_the = pi / 2.0 + angle;
+		const float pi = 3.14159265359;
+		const float angle = 0.463647609; //std::atan(0.5);
+		const float north_the = pi / 2.0 - angle;
+		const float south_the = pi / 2.0 + angle;
 
 		constexpr int ico_vertices = 12;
 		constexpr int total_faces = 20;
@@ -1502,8 +1503,8 @@ void main() {
 			for (int i = 0; i < objects.size(); i++) {
 				auto& physics = access_object(index_to_handle[i]).physics;
 				auto& updated = integrator_updates[i];
-				physics.pos += first_collision[i] * (updated.pos - physics.pos);
-				//physics.pos = updated.pos;
+				float coef = first_collision[i] != no_collision ? first_collision[i] : 1.0f;
+				physics.pos += coef * (updated.pos - physics.pos);
 				physics.vel = updated.vel;
 				physics.force = glm::vec3(0.0f);
 			}
@@ -1513,34 +1514,46 @@ void main() {
 				line.clear();
 				line.resize(objects.size(), {});
 			}
-			
+
+			auto get_collision_axes = [&] () {
+				glm::vec3 n = body_j.pos - body_i.pos;
+				float n_len = glm::length(n);
+				if (n_len > eps) {
+					n /= n_len;
+				}
+				else {
+					continue;
+				}
+
+				glm::vec3 v = body_i.vel;
+				float v_len = glm::length(v);
+				if (v_len < eps) {
+					v = body_j.vel;
+					v_len = glm::length(v);
+				} if (v_len < eps) {
+					continue;
+				}
+
+				glm::vec3 u1 = glm::cross(n, v / v_len);
+				float u1_len = glm::length(u1);
+				if (u1_len < eps) {
+					glm::
+				}
+
+				glm::vec3 u2{};
+				u2 = glm::cross(n, u1);
+			};
+
 			for (int i = 0; i < objects.size(); i++) {
 				auto& body_i = access_object(index_to_handle[i]).physics;
 				for (int j = i + 1; j < objects.size(); j++) {
 					auto& body_j = access_object(index_to_handle[j]).physics;
-					if (collision_matrix[i][j] == no_collision || std::abs(collision_matrix[i][j] - first_collision[i]) > eps) {
+					if (collision_matrix[i][j] == no_collision || collision_matrix[i][j] > first_collision[i]) {
 						continue;
 					}
 
 					// axes we project our velocities on
-					glm::vec3 n = body_j.pos - body_i.pos;
-					if (float len = glm::length(n); len > eps) {
-						n /= len;
-					} else {
-						continue;
-					}
-
-					glm::vec3 u1{};
-					glm::vec3 u2{};
-					if (float vi_len = glm::length(body_i.vel); vi_len > eps) {
-						u1 = glm::normalize(glm::cross(n, body_i.vel / vi_len));
-						u2 = glm::normalize(glm::cross(n, u1));
-					} else if (float vj_len = glm::length(body_j.vel); vj_len > eps) {
-						u1 = glm::normalize(glm::cross(n, body_j.vel / vj_len));
-						u2 = glm::normalize(glm::cross(n, u1));
-					} else {
-						continue;
-					}
+					auto [n, u1, u2] = get_collision_axes(body_i, body_j); // TODO
 
 					// compute impulse change
 					glm::vec3 dv = body_j.vel - body_i.vel;
@@ -1562,6 +1575,9 @@ void main() {
 						return acc + data.affecting_mass;
 					}
 				);
+				if (m < eps) {
+					continue;
+				}
 				glm::vec3 v = std::accumulate(resolved_impulses[i].begin(), resolved_impulses[i].end(), glm::vec3(0.0f),
 					[&] (const auto& acc, const auto& data) {
 						return acc + data.resolved_velocity * (data.affecting_mass / m);
@@ -1569,7 +1585,10 @@ void main() {
 				);
 				auto& object = access_object(index_to_handle[i]);
 				object.physics.vel = v;
-				sync_object_transform_physics(object);
+			}
+
+			for (auto handle : index_to_handle) {
+				sync_object_transform_physics(access_object(handle));
 			}
 		}
 
@@ -1810,7 +1829,7 @@ int main() {
 		while (!window.should_close()) {
 			glfw::poll_events();
 
-			physics.update(0.005f);
+			physics.update(0.05f);
 
 			pass.execute_action([&] (framebuffer_t& fbo) {
 				render_seq.draw();
