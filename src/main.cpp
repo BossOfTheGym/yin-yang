@@ -1327,6 +1327,7 @@ void main() {
 		integrator_proxy_t integrator{};
 	};
 
+	// TODO : cache hashmap lookups 
 	class physics_system_t {
 	public:
 		static constexpr float no_collision = 2.0f;
