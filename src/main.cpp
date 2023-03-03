@@ -1429,7 +1429,7 @@ void main() {
 					float curr_length = overlap.r;
 					float k = overlap_spring_coef * (curr_length - base_length);
 					glm::vec3 dr = (body_j.pos - body_i.pos) / overlap.r;
-					body_i.force += k * dr;
+					body_i.force +=  k * dr;
 					body_j.force += -k * dr;
 				}
 			}
@@ -1500,6 +1500,8 @@ void main() {
 				} first_collision[i] = *std::min_element(collision_matrix[i].begin(), collision_matrix[i].end());
 			}
 
+			// TODO : when t = 0 objects stick together
+			// algorithm thinks that they collide so coef = 0.0 and their position is not updated 
 			for (int i = 0; i < objects.size(); i++) {
 				auto& physics = access_object(index_to_handle[i]).physics;
 				auto& updated = integrator_updates[i];
@@ -1720,7 +1722,7 @@ int main() {
 				.scale = glm::vec3(1.0f), .rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f), .translation = glm::vec3(0.0f) 
 			},
 			.physics = {
-				.pos = glm::vec3(0.0f, 0.0f, 5.0f), .vel = glm::vec3(0.0f, 0.0f, 0.0f), .mass = 1.0f, .radius = 1.0f,
+				.pos = glm::vec3(0.0f, 0.0f, 5.0f), .vel = glm::vec3(0.0f, 0.0f, 0.0f), .mass = 0.2f, .radius = 1.0f,
 			},
 			.material = { .color = glm::vec3(0.0f, 1.0f, 0.0f), .specular_strength = 0.5f, .shininess = 32.0f, }
 		});
@@ -1731,7 +1733,7 @@ int main() {
 				.scale = glm::vec3(1.0f), .rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f), .translation = glm::vec3(0.0f) 
 			},
 			.physics = {
-				.pos = glm::vec3(0.0f, 0.0f, -5.0f), .vel = glm::vec3(0.0f, 0.0f, 0.0f), .mass = 1.0f, .radius = 1.0f
+				.pos = glm::vec3(0.0f, 0.0f, -5.0f), .vel = glm::vec3(0.0f, 0.0f, 0.0f), .mass = 0.2f, .radius = 1.0f
 			},
 			.material = { .color = glm::vec3(0.0f, 0.0f, 1.0f), .specular_strength = 0.5f, .shininess = 32.0f, }
 		});
@@ -1761,7 +1763,7 @@ int main() {
 				.translation = glm::vec3(2.0f, 0.0f, 0.0f)
 			},
 			.material = { .color = glm::vec3(1.0f, 0.0f, 0.0f), .specular_strength = 0.5, .shininess = 32.0f },
-			.attractor = { .pos = glm::vec3(+2.0f, 0.0f, 0.0f), .gm = 30.0f, .min_dist = 0.1, .max_dist = 10.0f }
+			.attractor = { .pos = glm::vec3(+2.0f, 0.0f, 0.0f), .gm = 35.0f, .min_dist = 0.1, .max_dist = 200.0f }
 		});
 
 		handle_t attractor1 = objects.add({
@@ -1772,7 +1774,7 @@ int main() {
 				.translation = glm::vec3(-2.0f, 0.0f, 0.0f)
 			},
 			.material = { .color = glm::vec3(1.0f, 0.0f, 0.0f), .specular_strength = 0.5, .shininess = 32.0f },
-			.attractor = { .pos = glm::vec3(-2.0f, 0.0f, 0.0f), .gm = 30.0f, .min_dist = 0.1, .max_dist = 10.0f }
+			.attractor = { .pos = glm::vec3(-2.0f, 0.0f, 0.0f), .gm = 35.0f, .min_dist = 0.1, .max_dist = 200.0f }
 		});
 
 		std::unordered_set<handle_t> basic_renderables = {ball0, ball1, attractor0, attractor1};
