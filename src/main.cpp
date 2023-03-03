@@ -1515,33 +1515,28 @@ void main() {
 				line.resize(objects.size(), {});
 			}
 
-			auto get_collision_axes = [&] () {
-				glm::vec3 n = body_j.pos - body_i.pos;
+			auto get_collision_axes = [&] (auto& body1, auto& body2) {
+				glm::vec3 n = body2.pos - body1.pos;
 				float n_len = glm::length(n);
 				if (n_len > eps) {
 					n /= n_len;
-				}
-				else {
-					continue;
-				}
-
-				glm::vec3 v = body_i.vel;
-				float v_len = glm::length(v);
-				if (v_len < eps) {
-					v = body_j.vel;
-					v_len = glm::length(v);
-				} if (v_len < eps) {
-					continue;
+				} else {
+					return std::tuple{false, glm::vec3(0.0f), glm::vec3(0.0f), glm::vec3(0.0f)};
 				}
 
-				glm::vec3 u1 = glm::cross(n, v / v_len);
+				glm::vec3 u1 = glm::cross(n, body1.vel); // zero-vector or colinear vector cases go here 
 				float u1_len = glm::length(u1);
 				if (u1_len < eps) {
-					glm::
+					u1 = glm::cross(n, body2.vel); // zero-vector or colinear vector cases go here
+					u1_len = glm::length(u1);
+				} if (u1_len > eps) {
+					u1 /= u1_len;
+				} else {
+					return std::tuple{true, n, glm::vec3(0.0f), glm::vec3(0.0f)}; // both velocities colinear with normal
 				}
 
-				glm::vec3 u2{};
-				u2 = glm::cross(n, u1);
+				glm::vec3 u2 = glm::normalize(glm::cross(n, u1)); // guaranteed to exist
+				return std::tuple{true, n, u1, u2};
 			};
 
 			for (int i = 0; i < objects.size(); i++) {
@@ -1553,7 +1548,10 @@ void main() {
 					}
 
 					// axes we project our velocities on
-					auto [n, u1, u2] = get_collision_axes(body_i, body_j); // TODO
+					auto [any_axes, n, u1, u2] = get_collision_axes(body_i, body_j);
+					if (!any_axes) {
+						continue;
+					}
 
 					// compute impulse change
 					glm::vec3 dv = body_j.vel - body_i.vel;
