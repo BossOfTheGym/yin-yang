@@ -1068,7 +1068,7 @@ void main() {
 		}
 
 		glm::mat4 get_proj() const {
-			return glm::perspective(glm::radians(45.0f), aspect_ratio, 0.1f, 100.0f);
+			return glm::perspective(glm::radians(45.0f), aspect_ratio, near, far);
 		}
 
 		float fov{};
@@ -1316,6 +1316,58 @@ void main() {
 		);
 	}
 
+	// yeah, I don't need this....
+	std::tuple<float, float> get_closest_segment_segment(
+					const glm::vec3& p00, const glm::vec3& p01, const glm::vec3& p10, const glm::vec3& p11, float eps) {
+		glm::vec3 dp = p00 - p01;
+		glm::vec3 d0 = p01 - p00;
+		glm::vec3 d1 = p11 - p10;
+
+		float a = glm::dot(d0, d0);
+		float c = glm::dot(d1, d1);
+		if (a < eps) { // first segment degenerates into point
+			if (c > eps) { // point-segment
+				return {0.0f, std::clamp(glm::dot(p01 - p10, d1) / c, 0.0f, 1.0f)};
+			} else { // point-point
+				return {0.0f, 0.0f};
+			}
+		} if (c < eps) { // second segment degenerates into point
+			return {std::clamp(glm::dot(p10 - p01, d0) / a, 0.0f, 1.0f), 0.0f};
+		}
+
+		float b = glm::dot(d0, d1);
+		float D = -b * b + a * c;
+		if (D < eps) { // segments are colinear
+			float p0 = glm::dot(p10 - p00, d0) / a;
+			float p1 = glm::dot(p11 - p00, d0) / a;
+			float s0 = 0.0f;
+			float s1 = 1.0f;
+			if (p0 > p1) {
+				std::swap(p0, p1);
+				std::swap(s0, s1);
+			} if (p0 <= 1.0f && 0.0f <= p1) { // projections intersect
+				return {p0, std::clamp(glm::dot(p01 + p0 * d0 - p10, d1) / c, 0.0f, 1.0f)};
+			} if (p1 < 0.0f) {
+				return {0.0f, s1};
+			} return {1.0f, s0};
+		}
+
+		float d = glm::dot(dp, d0);
+		float e = glm::dot(dp, d1);
+		return {std::clamp((-c * d + b * e) / D, 0.0f, 1.0f), std::clamp((-b * d + a * e) / D, 0.0f, 1.0f)};
+	}
+
+	// yeah, I don't need this....
+	bool test_capsule_capsule(const glm::vec3& p00, const glm::vec3& p01, float r0,
+							const glm::vec3& p10, const glm::vec3& p11, float r1, float eps) {
+		auto [t, s] = get_closest_segment_segment(p00, p01, p10, p11, eps);
+		glm::vec3 p0 = p00 + t * (p01 - p00);
+		glm::vec3 p1 = p10 + s * (p11 - p10);
+		glm::vec3 dp = p1 - p0;
+		float r = r0 + r1;
+		return glm::dot(dp, dp) <= r * r;
+	}
+
 	struct physics_system_info_t {
 		float eps{};
 		float overlap_coef{};
@@ -1501,12 +1553,10 @@ void main() {
 				} first_collision[i] = *std::min_element(collision_matrix[i].begin(), collision_matrix[i].end());
 			}
 
-			// TODO : when t = 0 objects stick together
-			// algorithm thinks that they collide so coef = 0.0 and their position is not updated 
 			for (int i = 0; i < objects.size(); i++) {
 				auto& physics = access_object(index_to_handle[i]).physics;
 				auto& updated = integrator_updates[i];
-				float coef = first_collision[i] != no_collision ? first_collision[i] : 1.0f;
+				float coef = first_collision[i] != no_collision && first_collision[i] > eps ? first_collision[i] : 1.0f;
 				physics.pos += coef * (updated.pos - physics.pos);
 				physics.vel = updated.vel;
 				physics.force = glm::vec3(0.0f);
@@ -1589,7 +1639,8 @@ void main() {
 			}
 
 			for (auto handle : index_to_handle) {
-				sync_object_transform_physics(access_object(handle));
+				auto& object = access_object(handle);
+				sync_object_transform_physics(object);
 			}
 		}
 
@@ -1643,12 +1694,12 @@ void main() {
 }
 
 int main() {
-	constexpr int window_width = 400;
-	constexpr int window_height = 400;
+	constexpr int window_width = 1280;
+	constexpr int window_height = 720;
 	constexpr int tex_width = 256;
 	constexpr int tex_height = 256;
-	constexpr int fbo_width = 300;
-	constexpr int fbo_height = 300;
+	constexpr int fbo_width = 1100;
+	constexpr int fbo_height = 680;
 
 	glfw::guard_t glfw_guard;
 	glfw::window_t window(glfw::window_params_t::create_basic_opengl("yin-yang", window_width, window_height, 4, 6));
@@ -1723,7 +1774,7 @@ int main() {
 				.scale = glm::vec3(1.0f), .rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f), .translation = glm::vec3(0.0f) 
 			},
 			.physics = {
-				.pos = glm::vec3(0.0f, 0.0f, 5.0f), .vel = glm::vec3(0.0f, 0.0f, 0.0f), .mass = 0.2f, .radius = 1.0f,
+				.pos = glm::vec3(2.25f, 0.0f, 2.25f), .vel = glm::vec3(0.0f, 1.0f, 0.0f), .mass = 0.2f, .radius = 1.0f,
 			},
 			.material = { .color = glm::vec3(0.0f, 1.0f, 0.0f), .specular_strength = 0.5f, .shininess = 32.0f, }
 		});
@@ -1734,15 +1785,59 @@ int main() {
 				.scale = glm::vec3(1.0f), .rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f), .translation = glm::vec3(0.0f) 
 			},
 			.physics = {
-				.pos = glm::vec3(0.0f, 0.0f, -5.0f), .vel = glm::vec3(0.0f, 0.0f, 0.0f), .mass = 0.2f, .radius = 1.0f
+				.pos = glm::vec3(2.25f, 0.0f, -2.25f), .vel = glm::vec3(0.0f, -1.0f, 0.0f), .mass = 0.2f, .radius = 1.0f
 			},
 			.material = { .color = glm::vec3(0.0f, 0.0f, 1.0f), .specular_strength = 0.5f, .shininess = 32.0f, }
 		});
 
+		handle_t ball2 = objects.add({
+			.transform = {
+				.base = glm::mat4(1.0f),
+				.scale = glm::vec3(1.0f), .rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f), .translation = glm::vec3(0.0f) 
+			},
+			.physics = {
+				.pos = glm::vec3(-2.25f, 0.0f, 2.25f), .vel = glm::vec3(0.0f, 1.0f, 0.0f), .mass = 0.2f, .radius = 1.0f
+			},
+			.material = { .color = glm::vec3(1.0f, 1.0f, 0.0f), .specular_strength = 0.5f, .shininess = 32.0f, }
+		});
+
+		handle_t ball3 = objects.add({
+			.transform = {
+				.base = glm::mat4(1.0f),
+				.scale = glm::vec3(1.0f), .rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f), .translation = glm::vec3(0.0f) 
+			},
+			.physics = {
+				.pos = glm::vec3(-2.25f, 0.0f, -2.25f), .vel = glm::vec3(0.0f, -1.0f, 0.0f), .mass = 0.2f, .radius = 1.0f
+			},
+			.material = { .color = glm::vec3(1.0f, 0.0f, 1.0f), .specular_strength = 0.5f, .shininess = 32.0f, }
+		});
+
+		handle_t ball4 = objects.add({
+			.transform = {
+				.base = glm::mat4(1.0f),
+				.scale = glm::vec3(0.7f), .rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f), .translation = glm::vec3(0.0f) 
+			},
+			.physics = {
+				.pos = glm::vec3(4.0f, 0.0f, -4.0f), .vel = glm::vec3(0.0f, 0.0f, -2.0f), .mass = 0.2f, .radius = 0.7f
+			},
+			.material = { .color = glm::vec3(1.0f, 1.0f, 1.0f), .specular_strength = 0.5f, .shininess = 32.0f, }
+		});
+
+		handle_t ball5 = objects.add({
+			.transform = {
+				.base = glm::mat4(1.0f),
+				.scale = glm::vec3(0.7f), .rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f), .translation = glm::vec3(0.0f) 
+			},
+			.physics = {
+				.pos = glm::vec3(-4.0f, 0.0f, 4.0f), .vel = glm::vec3(0.0f, 0.0f, +2.0f), .mass = 0.2f, .radius = 0.7f
+			},
+			.material = { .color = glm::vec3(1.0f, 0.5f, 0.25f), .specular_strength = 0.5f, .shininess = 32.0f, }
+		});
+
 		handle_t viewer = objects.add({
 			.camera = {
-				.fov = 45.0f, .aspect_ratio = (float)fbo_width / fbo_height, .near = 0.1f, .far = 100.0f,
-				.eye = glm::vec3(0.0f, 10.0f, 0.0f),
+				.fov = 75.0f, .aspect_ratio = (float)fbo_width / fbo_height, .near = 1.0f, .far = 300.0f,
+				.eye = glm::vec3(0.0f, 20.0f, 0.0f),
 				.center = glm::vec3(0.0f, 0.0f, 0.0f),
 				.up = glm::vec3(0.0f, 0.0f, 1.0f)
 			}
@@ -1761,10 +1856,10 @@ int main() {
 				.base = glm::mat4(1.0f),
 				.scale = glm::vec3(0.5f),
 				.rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f),
-				.translation = glm::vec3(2.0f, 0.0f, 0.0f)
+				.translation = glm::vec3(4.0f, 0.0f, 0.0f)
 			},
 			.material = { .color = glm::vec3(1.0f, 0.0f, 0.0f), .specular_strength = 0.5, .shininess = 32.0f },
-			.attractor = { .pos = glm::vec3(+2.0f, 0.0f, 0.0f), .gm = 35.0f, .min_dist = 0.1, .max_dist = 200.0f }
+			.attractor = { .pos = glm::vec3(+4.0f, 0.0f, 0.0f), .gm = 70.0f, .min_dist = 2.0, .max_dist = 200.0f }
 		});
 
 		handle_t attractor1 = objects.add({
@@ -1772,13 +1867,13 @@ int main() {
 				.base = glm::mat4(1.0f),
 				.scale = glm::vec3(0.5f),
 				.rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f),
-				.translation = glm::vec3(-2.0f, 0.0f, 0.0f)
+				.translation = glm::vec3(-4.0f, 0.0f, 0.0f)
 			},
 			.material = { .color = glm::vec3(1.0f, 0.0f, 0.0f), .specular_strength = 0.5, .shininess = 32.0f },
-			.attractor = { .pos = glm::vec3(-2.0f, 0.0f, 0.0f), .gm = 35.0f, .min_dist = 0.1, .max_dist = 200.0f }
+			.attractor = { .pos = glm::vec3(-4.0f, 0.0f, 0.0f), .gm = 70.0f, .min_dist = 2.0, .max_dist = 200.0f }
 		});
 
-		std::unordered_set<handle_t> basic_renderables = {ball0, ball1, attractor0, attractor1};
+		std::unordered_set<handle_t> basic_renderables = {ball0, ball1, ball2, ball3, ball4, ball5, attractor0};
 
 		basic_render_seq_t render_seq(program_ptr);
 		render_seq.set_general_setup([&] (shader_program_t& program) {
@@ -1810,13 +1905,12 @@ int main() {
 		velocity_verlet_integrator_t vel_ver_int;
 		vel_ver_int.set_object_accessor(object_accessor);
 		vel_ver_int.add_attractor(attractor0);
-		vel_ver_int.add_attractor(attractor1);
 
 		physics_system_info_t physics_system_info{
 			.eps = 1e-6,
 			.overlap_coef = 0.3,
 			.overlap_thresh = 1e-4,
-			.overlap_spring_coef = 1.0,
+			.overlap_spring_coef = 0.2,
 			.overlap_resolution_iters = 5,
 			.movement_limit = 10.0f,
 			.velocity_limit = 10.0f,
@@ -1826,11 +1920,15 @@ int main() {
 		physics.set_object_accessor(object_accessor);
 		physics.add(ball0);
 		physics.add(ball1);
+		physics.add(ball2);
+		physics.add(ball3);
+		physics.add(ball4);
+		physics.add(ball5);
 
 		while (!window.should_close()) {
 			glfw::poll_events();
 
-			physics.update(0.05f);
+			physics.update(0.01f);
 
 			pass.execute_action([&] (framebuffer_t& fbo) {
 				render_seq.draw();
