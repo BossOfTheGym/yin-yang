@@ -930,7 +930,7 @@ void main() {
 			}
 
 		public:
-			handle_t acquire() {
+			[[nodiscard]] handle_t acquire() {
 				if (head == null_handle) {
 					extend();
 				}
@@ -970,12 +970,13 @@ void main() {
 	using handle_pool_t = impl::handle_pool_t<handle_t, null_handle>;
 
 	template<class object_t>
-	struct handle_storage_t {
+	class handle_storage_t {
+	public:
 		using handles_t = handle_pool_t;	
 		using storage_t = std::unordered_map<handle_t, object_t>;
 
 		// simplified
-		handle_t add(const object_t& object) {
+		[[nodiscard]] handle_t add(const object_t& object) {
 			handle_t handle = handles.acquire();
 			assert(get(handle) == nullptr);
 			objects[handle] = object;
@@ -1009,6 +1010,7 @@ void main() {
 			return objects.end();
 		}
 
+	private:
 		handles_t handles;
 		storage_t objects;
 	};
@@ -1025,13 +1027,7 @@ void main() {
 	// directional force
 	struct force_t {
 		glm::vec3 dir{};
-	};
-
-	struct body_state_t {
-		glm::vec3 pos{};
-		glm::vec3 vel{};
-		glm::vec3 force{};
-		float mass{};
+		float mag{};
 	};
 
 	struct physics_t {
@@ -1090,6 +1086,18 @@ void main() {
 		std::shared_ptr<vertex_array_t> vao;
 	};
 
+	struct controller_if_t {
+		virtual ~controller_if_t() = default;
+	};
+
+	struct controller_t {
+		controller_if_t* operator -> () {
+			return impl.get();
+		}
+
+		std::unique_ptr<controller_if_t> impl;
+	};
+
 	// giant abomination, yep, very cheap solution
 	// TODO : dismember?
 	struct object_t {
@@ -1101,18 +1109,31 @@ void main() {
 		camera_t camera{};
 		omnidir_light_t omnilight{};
 		vao_t vao{};
+		controller_if_t controller;
+	};
+
+	using object_accessor_t = std::function<object_t*(handle_t)>;
+
+	// TODO
+	struct basic_renderer_t {
+		object_accessor_t object_accessor;
+		handle_t viewer{null_handle};
+		std::unordered_set<handle_t> renderables;
+		basic_render_seq_t render_seq;
+		basic_pass_t render_pass;
+	};
+	
+	struct body_state_t {
+		glm::vec3 pos{};
+		glm::vec3 vel{};
+		glm::vec3 force{};
+		float mass{};
 	};
 
 	struct velocity_verlet_integrator_t {
-		using object_accessor_t = std::function<object_t*(handle_t)>;
-
 		template<class accessor_t>
 		void set_object_accessor(accessor_t&& accessor) {
 			object_accessor = std::forward<accessor_t>(accessor);
-		}
-
-		object_t& access_object(handle_t handle) {
-			return *object_accessor(handle);
 		}
 
 		object_accessor_t object_accessor;
@@ -1140,29 +1161,30 @@ void main() {
 		std::unordered_set<handle_t> force_handles;
 
 
-		force_t compute_force(const body_state_t& state) {
-			force_t total_force{state.force / state.mass};
+		glm::vec3 compute_force(const body_state_t& state) {
+			glm::vec3 acc{};
 			for (auto handle : attractor_handles) {
-				auto& attractor = access_object(handle).attractor; // oh no, we're going to crash :D
+				auto& attractor = object_accessor(handle)->attractor;
 				glm::vec3 dr = attractor.pos - state.pos;
 				float dr_mag = glm::length(dr);
 				float dr_mag2 = glm::dot(dr, dr);
 				if (attractor.min_dist <= dr_mag && dr_mag <= attractor.max_dist) {
-					total_force.dir += attractor.gm / dr_mag2 * dr / dr_mag;
+					acc += attractor.gm / dr_mag2 * dr / dr_mag;
 				}
 			} for (auto handle : force_handles) {
-				auto& force = access_object(handle).force; // oh no, we're going to crash :D
-				total_force.dir += force.dir;
-			} return total_force;
+				auto& force = object_accessor(handle)->force;
+				acc += force.dir * force.mag;
+			} return acc;
 		}
 
+		// simplification, compute acceleration beforehand
+		// this method will update state considering it acceleration as const
 		body_state_t update(const body_state_t& state, float dt) {
 			body_state_t new_state = state;
-			force_t f0 = compute_force(state);
-			glm::vec3 vel_tmp = state.vel + 0.5f * f0.dir * dt;
+			glm::vec3 acc = state.force / state.mass;
+			glm::vec3 vel_tmp = state.vel + 0.5f * acc * dt;
 			new_state.pos = state.pos + vel_tmp * dt;
-			force_t f1 = compute_force(new_state);
-			new_state.vel = vel_tmp + 0.5f * f1.dir * dt;
+			new_state.vel = vel_tmp + 0.5f * acc * dt;
 			return new_state;
 		}
 	};
@@ -1173,7 +1195,7 @@ void main() {
 	template<class type_t>
 	struct is_integrator_t<type_t, 
 		std::enable_if_t<
-			std::is_invocable_r_v<force_t, decltype(&type_t::compute_force), const type_t*, const body_state_t&>
+			std::is_invocable_r_v<force_t, decltype(&type_t::compute_acc), const type_t*, const body_state_t&>
 			&& std::is_invocable_r_v<body_state_t, decltype(&type_t::update), const type_t*, const body_state_t&, float>
 		>> : std::true_type {};
 
@@ -1181,7 +1203,7 @@ void main() {
 	inline constexpr bool is_integrator_v = is_integrator_t<type_t>::value;
 
 	struct integrator_proxy_t {
-		using compute_force_func_t = force_t(*)(void*, const body_state_t&);
+		using compute_force_func_t = glm::vec3(*)(void*, const body_state_t&);
 		using update_func_t = body_state_t(*)(void*, const body_state_t&, float);
 
 		integrator_proxy_t() = default;
@@ -1215,7 +1237,7 @@ void main() {
 		integrator_proxy_t& operator = (const integrator_proxy_t&) = default;
 		integrator_proxy_t& operator = (integrator_proxy_t&&) noexcept = default;
 
-		force_t compute_force(const body_state_t& state) const {
+		glm::vec3 compute_force(const body_state_t& state) const {
 			return compute_force_func(instance, state);
 		}
 
@@ -1376,10 +1398,15 @@ void main() {
 		int overlap_resolution_iters{};
 		float movement_limit{};
 		float velocity_limit{};
+		float touch_thresh{};
+		float touch_coef_workaround{};
+		float impulse_cor{};
+		float impact_thresh{};
+		int dt_split{};
 		integrator_proxy_t integrator{};
 	};
 
-	// TODO : cache hashmap lookups 
+	// TODO : fix
 	class physics_system_t {
 	public:
 		static constexpr float no_collision = 2.0f;
@@ -1392,18 +1419,18 @@ void main() {
 			, overlap_resolution_iters{info.overlap_resolution_iters}
 			, movement_limit{info.movement_limit}
 			, velocity_limit{info.velocity_limit}
+			, touch_thresh{info.touch_thresh}
+			, touch_coef_workaround{info.touch_coef_workaround}
+			, impulse_cor{info.impulse_cor}
+			, impact_thresh{info.impact_thresh}
+			, dt_split{info.dt_split}
 			, integrator{info.integrator}
 			{}
 
-		using object_accessor_t = std::function<object_t*(handle_t)>;
-
 		template<class accessor_t>
 		void set_object_accessor(accessor_t&& accessor) {
+			dirty = true;
 			object_accessor = std::forward<accessor_t>(accessor);
-		}
-
-		object_t& access_object(handle_t handle) {
-			return *object_accessor(handle);
 		}
 
 		template<class integrator_t>
@@ -1412,20 +1439,27 @@ void main() {
 		}
 
 		void add(handle_t handle) {
+			dirty = true;
 			objects.insert(handle);
 		}
 
 		void del(handle_t handle) {
+			dirty = true;
 			objects.erase(handle);
 		}
 
 
 	private:
-		void rebuild_index_to_handle_map() {
+		void cache_objects() {
+			if (!dirty) {
+				return;
+			}
+			cached_objects.clear();
 			index_to_handle.clear();
 			for (auto& handle : objects) {
 				index_to_handle.push_back(handle);
-			}
+				cached_objects.push_back(object_accessor(handle));
+			} dirty = false;
 		}
 
 		void resolve_overlaps() {
@@ -1439,9 +1473,9 @@ void main() {
 				overlap_movement.clear();
 				overlap_movement.resize(objects.size(), glm::vec3(0.0f));
 				for (int i = 0; i < objects.size(); i++) {
-					auto& body_i = access_object(index_to_handle[i]).physics;
+					auto& body_i = cached_objects[i]->physics;
 					for (int j = i + 1; j < objects.size(); j++) {
-						auto& body_j = access_object(index_to_handle[j]).physics;
+						auto& body_j = cached_objects[j]->physics;
 						auto overlap_opt = get_sphere_sphere_overlap(body_i.pos, body_i.radius, body_j.pos, body_j.radius, eps);
 						overlap_matrix[i][j] = overlap_opt;
 						if (!overlap_opt) {
@@ -1454,7 +1488,7 @@ void main() {
 				}
 
 				for (int i = 0; i < objects.size(); i++) {
-					access_object(index_to_handle[i]).physics.pos += overlap_movement[i];
+					cached_objects[i]->physics.pos += overlap_movement[i];
 				}
 
 				glm::vec3 accum = glm::vec3(0.0f);
@@ -1466,9 +1500,9 @@ void main() {
 			}
 
 			for (int i = 0; i < objects.size(); i++) {
-				auto& body_i = access_object(index_to_handle[i]).physics;
+				auto& body_i = cached_objects[i]->physics;
 				for (int j = i + 1; j < objects.size(); j++) {
-					auto& body_j = access_object(index_to_handle[j]).physics;
+					auto& body_j = cached_objects[j]->physics;
 					auto& overlap_opt = overlap_matrix[i][j];
 					if (!overlap_opt) {
 						continue;
@@ -1482,7 +1516,7 @@ void main() {
 					float curr_length = overlap.r;
 					float k = overlap_spring_coef * (curr_length - base_length);
 					glm::vec3 dr = (body_j.pos - body_i.pos) / overlap.r;
-					body_i.force +=  k * dr;
+					body_i.force += +k * dr;
 					body_j.force += -k * dr;
 				}
 			}
@@ -1500,9 +1534,10 @@ void main() {
 
 		void get_integrator_updates(float dt) {
 			integrator_updates.clear();
-			for (auto handle : index_to_handle) {
-				auto& physics = access_object(handle).physics;
+			for (int i = 0; i < objects.size(); i++) {
+				auto& physics = cached_objects[i]->physics;
 				auto state = body_state_t{physics.pos, physics.vel, physics.force, physics.mass};
+				state.force += integrator.compute_force(state);
 				auto new_state = integrator.update(state, dt);
 				new_state.pos = limit_movement(state.pos, new_state.pos, movement_limit);
 				new_state.vel = limit_vec(new_state.vel, velocity_limit);
@@ -1510,14 +1545,71 @@ void main() {
 			}
 		}
 
-		struct resolved_impulse_t {
-			glm::vec3 resolved_velocity{};
-			float affecting_mass{};
+		struct collision_axes_t {
+			glm::vec3 n{}, u1{}, u2{};
 		};
+
+		std::optional<collision_axes_t> get_collision_axes(const physics_t& body1, const physics_t& body2) {
+			glm::vec3 n = body2.pos - body1.pos;
+			float n_len = glm::length(n);
+			if (n_len > eps) {
+				n /= n_len;
+			} else {
+				return std::nullopt;
+			}
+
+			glm::vec3 u1 = glm::cross(n, body1.vel); // zero-vector or colinear vector cases go here 
+			float u1_len = glm::length(u1);
+			if (u1_len < eps) {
+				u1 = glm::cross(n, body2.vel); // zero-vector or colinear vector cases go here
+				u1_len = glm::length(u1);
+			} if (u1_len > eps) {
+				u1 /= u1_len;
+			} else {
+				return collision_axes_t{n, glm::vec3(0.0f), glm::vec3(0.0f)}; // both velocities colinear with normal
+			}
+
+			glm::vec3 u2 = glm::normalize(glm::cross(n, u1)); // guaranteed to exist
+			return collision_axes_t{n, u1, u2};
+		}
+
+		struct resolved_impact_t {
+			glm::vec3 v1{};
+			glm::vec3 v2{};
+		};
+
+		std::optional<resolved_impact_t> resolve_impact(const physics_t& body1, const physics_t& body2) {
+			// axes we project our velocities on
+			auto axes_opt = get_collision_axes(body1, body2);
+			if (!axes_opt) {
+				return std::nullopt;
+			} auto& [n, u1, u2] = *axes_opt;
+
+			// compute impulse change
+			glm::vec3 v1 = body1.vel;
+			glm::vec3 v2 = body2.vel;
+			float m1 = body1.mass;
+			float m2 = body2.mass;
+			float pn = glm::dot(m1 * v1 + m2 * v2, n);
+			// TODO : impact thresh
+			glm::vec3 dv = v2 - v1;
+			float m = m1 + m2;
+			float dvn = glm::dot(dv, n);
+			float v1n = (pn + impulse_cor * m2 * dvn) / m;
+			float v2n = (pn - impulse_cor * m1 * dvn) / m;
+			glm::vec3 new_v1 = v1n * n + glm::dot(v1, u1) * u1 + glm::dot(v1, u2) * u2;
+			glm::vec3 new_v2 = v2n * n + glm::dot(v2, u1) * u1 + glm::dot(v2, u2) * u2;
+			return resolved_impact_t{new_v1, new_v2};
+		}
 
 		void sync_object_transform_physics(object_t& object) {
 			object.transform.translation = object.physics.pos;
 		}
+
+		struct impact_data_t {
+			glm::vec3 resolved_velocity{};
+			float affecting_mass{};
+		};
 
 		// we also apply here some physics
 		// we will ignore t = 0
@@ -1532,10 +1624,10 @@ void main() {
 			}
 			
 			for (int i = 0; i < objects.size(); i++) {
-				auto& body_i = access_object(index_to_handle[i]).physics;
+				auto& body_i = cached_objects[i]->physics;
 				auto& updated_i = integrator_updates[i];
 				for (int j = i + 1; j < objects.size(); j++) {
-					auto& body_j = access_object(index_to_handle[j]).physics;
+					auto& body_j = cached_objects[j]->physics;
 					auto& updated_j = integrator_updates[j];
 					float t = collide_moving_sphere_sphere(body_i.pos, updated_i.pos - body_i.pos, body_i.radius,
 								body_j.pos, updated_j.pos - body_j.pos, body_j.radius, eps).value_or(no_collision);
@@ -1554,9 +1646,15 @@ void main() {
 			}
 
 			for (int i = 0; i < objects.size(); i++) {
-				auto& physics = access_object(index_to_handle[i]).physics;
+				auto& physics = cached_objects[i]->physics;
 				auto& updated = integrator_updates[i];
-				float coef = first_collision[i] != no_collision && first_collision[i] > eps ? first_collision[i] : 1.0f;
+				// TODO : remove this shitty workaround
+				float coef{};
+				if (first_collision[i] > touch_thresh) {
+					coef = first_collision[i] != no_collision ? first_collision[i] : 1.0f;
+				} else {
+					coef = touch_coef_workaround;
+				}
 				physics.pos += coef * (updated.pos - physics.pos);
 				physics.vel = updated.vel;
 				physics.force = glm::vec3(0.0f);
@@ -1566,61 +1664,18 @@ void main() {
 			for (auto& line : resolved_impulses) {
 				line.clear();
 				line.resize(objects.size(), {});
-			}
-
-			auto get_collision_axes = [&] (auto& body1, auto& body2) {
-				glm::vec3 n = body2.pos - body1.pos;
-				float n_len = glm::length(n);
-				if (n_len > eps) {
-					n /= n_len;
-				} else {
-					return std::tuple{false, glm::vec3(0.0f), glm::vec3(0.0f), glm::vec3(0.0f)};
-				}
-
-				glm::vec3 u1 = glm::cross(n, body1.vel); // zero-vector or colinear vector cases go here 
-				float u1_len = glm::length(u1);
-				if (u1_len < eps) {
-					u1 = glm::cross(n, body2.vel); // zero-vector or colinear vector cases go here
-					u1_len = glm::length(u1);
-				} if (u1_len > eps) {
-					u1 /= u1_len;
-				} else {
-					return std::tuple{true, n, glm::vec3(0.0f), glm::vec3(0.0f)}; // both velocities colinear with normal
-				}
-
-				glm::vec3 u2 = glm::normalize(glm::cross(n, u1)); // guaranteed to exist
-				return std::tuple{true, n, u1, u2};
-			};
-
-			for (int i = 0; i < objects.size(); i++) {
-				auto& body_i = access_object(index_to_handle[i]).physics;
+			} for (int i = 0; i < objects.size(); i++) {
+				auto& body_i = cached_objects[i]->physics;
 				for (int j = i + 1; j < objects.size(); j++) {
-					auto& body_j = access_object(index_to_handle[j]).physics;
+					auto& body_j = cached_objects[j]->physics;
 					if (collision_matrix[i][j] == no_collision || collision_matrix[i][j] > first_collision[i]) {
 						continue;
+					} if (auto vels = resolve_impact(body_i, body_j)) {
+						resolved_impulses[i][j] = {vels->v1, body_j.mass};
+						resolved_impulses[j][i] = {vels->v2, body_i.mass};
 					}
-
-					// axes we project our velocities on
-					auto [any_axes, n, u1, u2] = get_collision_axes(body_i, body_j);
-					if (!any_axes) {
-						continue;
-					}
-
-					// compute impulse change
-					glm::vec3 dv = body_j.vel - body_i.vel;
-					float m = body_i.mass + body_j.mass;
-					float dvn = glm::dot(dv, n);
-					float vin = glm::dot(body_i.vel, n) + 2.0f * dvn * (body_j.mass / m);
-					float vjn = glm::dot(body_j.vel, n) - 2.0f * dvn * (body_i.mass / m);
-					glm::vec3 vi = vin * n + glm::dot(body_i.vel, u1) * u1 + glm::dot(body_i.vel, u2) * u2;
-					glm::vec3 vj = vjn * n + glm::dot(body_j.vel, u1) * u1 + glm::dot(body_j.vel, u2) * u2;
-
-					resolved_impulses[i][j] = {vi, body_j.mass};
-					resolved_impulses[j][i] = {vj, body_i.mass};
 				}
-			}
-
-			for (int i = 0; i < objects.size(); i++) {
+			} for (int i = 0; i < objects.size(); i++) {
 				float m = std::accumulate(resolved_impulses[i].begin(), resolved_impulses[i].end(), 0.0f,
 					[&] (const auto& acc, const auto& data) {
 						return acc + data.affecting_mass;
@@ -1634,49 +1689,158 @@ void main() {
 						return acc + data.resolved_velocity * (data.affecting_mass / m);
 					}
 				);
-				auto& object = access_object(index_to_handle[i]);
-				object.physics.vel = v;
+				cached_objects[i]->physics.vel = v;
 			}
+		}
 
-			for (auto handle : index_to_handle) {
-				auto& object = access_object(handle);
-				sync_object_transform_physics(object);
+		void sync() {
+			for (auto* object : cached_objects) {
+				sync_object_transform_physics(*object);
 			}
 		}
 
 	public:
 		void update(float dt) {
-			rebuild_index_to_handle_map();
-			resolve_overlaps();
-			get_integrator_updates(dt);
-			resolve_collisions();
+			cache_objects();
+			for (int i = 0; i < dt_split; i++) {
+				resolve_overlaps();
+				get_integrator_updates(dt / dt_split);
+				resolve_collisions();
+			} sync();
 		}
 
 	private:
 		float eps{};
-
 		float overlap_coef{};
 		float overlap_thresh{};
 		float overlap_spring_coef{};
 		int overlap_resolution_iters{};
-		std::vector<glm::vec3> overlap_movement;
-		std::vector<std::vector<std::optional<overlap_t>>> overlap_matrix;
-
 		float movement_limit{};
 		float velocity_limit{};
+		float touch_thresh{};
+		float touch_coef_workaround{};
+		float impulse_cor{};
+		float impact_thresh{};
+		int dt_split{};
 		integrator_proxy_t integrator;
 
 		object_accessor_t object_accessor;
-		std::unordered_set<handle_t> objects;
 
+		bool dirty{true};
+		std::unordered_set<handle_t> objects;
+		std::vector<object_t*> cached_objects;
 		std::vector<handle_t> index_to_handle;
+		std::vector<glm::vec3> overlap_movement;
+		std::vector<std::vector<std::optional<overlap_t>>> overlap_matrix;
 		std::vector<body_state_t> integrator_updates;
 		std::vector<float> first_collision;
 		std::vector<std::vector<float>> collision_matrix; // values from [0, 1] or no_collision value
-		std::vector<std::vector<resolved_impulse_t>> resolved_impulses;
+		std::vector<std::vector<impact_data_t>> resolved_impulses;
 	};
 
-	// TODO : entity spawner
+	using tick_t = std::uint64_t;
+	using timer_release_func_t = void(*)(void* instance, handle_t handle);
+
+	class timer_handle_t {
+	public:
+		timer_handle_t() = default;
+		timer_handle_t(handle_t _handle, void* _instance, timer_release_func_t _release)
+			: handle{_handle}, instance{_instance}, release{_release} {}
+
+		~timer_handle_t() {
+			release_handle();
+		}
+
+		timer_handle_t(const timer_handle_t&) = delete;
+		timer_handle_t(timer_handle_t&& another) noexcept {
+			*this = std::move(another);
+		}
+
+		timer_handle_t& operator = (const timer_handle_t&) = delete;
+		timer_handle_t& operator = (timer_handle_t&& another) noexcept {
+			if (this != &another) {
+				std::swap(handle, another.handle);
+				std::swap(instance, another.instance);
+				std::swap(release, another.release);
+			} return *this;
+		}
+
+		void release_handle() {
+			release(instance, handle);
+		}
+
+		handle_t get_handle() const {
+			return handle;
+		}
+
+	private:
+		handle_t handle{};
+		void* instance{};
+		timer_release_func_t release{};
+	};
+
+	class timer_system_t {
+	private:
+		static void release_timer(void* instance, handle_t handle) {
+			timer_system_t* sys = (timer_system_t*)instance;
+			sys->remove(handle);
+		}
+
+	public:
+		template<class handler_t>
+		[[nodiscard]] timer_handle_t add(tick_t tick, handler_t&& handler) {
+			handle_t handle = handle_pool.acquire();
+			auto& timer = timers[handle];
+			timer.set_tick(tick);
+			timer.set_timeout_handler(std::forward<handler_t>(handler));
+			return timer_handle_t(handle, this, release_timer);
+		}
+
+		void remove(handle_t handle) {
+			timers.erase(handle);
+		}
+
+		void update(tick_t dt) {
+			for (auto& [handle, timer] : timers) {
+				timer.update(dt);
+			}
+		}
+
+	private:
+		std::unordered_map<handle_t, dt_timer_t<tick_t>> timers;
+		handle_pool_t handle_pool;
+	};
+
+	// struct cone_vec_gen_t {
+
+	// };
+
+	// class ball_spawner_t : public controller_if_t {
+	// public:
+	// 	ball_spawner_t(engine_ctx_if_t* _ctx, std::uint64_t _seed, float _radius, float _radius_variance, float _mass, float _mass_variance, const glm::vec3& ) {
+
+	// 	}
+
+	// 	void spawn_ball() {
+
+	// 	}
+
+	// private:
+	// 	engine_ctx_if_t* ctx{};
+	// 	std::uint64_t seed{};
+	// 	float radius{};
+	// 	float radius_variance{};
+	// 	float mass{};
+	// 	float mass_variance{};
+	// 	glm::vec3 velocity{};
+		
+	// 	tick_t interval{};
+	// 	timer_handle_t timer_handle{null_handle};
+	// };
+
+	// object_t create_ball_spawner() {
+
+	// }
 
 	// TODO : advanced physics
 	// TODO : grid update method
@@ -1774,7 +1938,7 @@ int main() {
 				.scale = glm::vec3(1.0f), .rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f), .translation = glm::vec3(0.0f) 
 			},
 			.physics = {
-				.pos = glm::vec3(2.25f, 0.0f, 2.25f), .vel = glm::vec3(0.0f, 1.0f, 0.0f), .mass = 0.2f, .radius = 1.0f,
+				.pos = glm::vec3(2.25f, 0.0f, 2.25f), .vel = glm::vec3(0.0f, 0.0f, 0.0f), .mass = 0.2f, .radius = 1.0f,
 			},
 			.material = { .color = glm::vec3(0.0f, 1.0f, 0.0f), .specular_strength = 0.5f, .shininess = 32.0f, }
 		});
@@ -1785,7 +1949,7 @@ int main() {
 				.scale = glm::vec3(1.0f), .rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f), .translation = glm::vec3(0.0f) 
 			},
 			.physics = {
-				.pos = glm::vec3(2.25f, 0.0f, -2.25f), .vel = glm::vec3(0.0f, -1.0f, 0.0f), .mass = 0.2f, .radius = 1.0f
+				.pos = glm::vec3(2.25f, 0.0f, -2.25f), .vel = glm::vec3(0.0f, 0.0f, 0.0f), .mass = 0.2f, .radius = 1.0f
 			},
 			.material = { .color = glm::vec3(0.0f, 0.0f, 1.0f), .specular_strength = 0.5f, .shininess = 32.0f, }
 		});
@@ -1796,7 +1960,7 @@ int main() {
 				.scale = glm::vec3(1.0f), .rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f), .translation = glm::vec3(0.0f) 
 			},
 			.physics = {
-				.pos = glm::vec3(-2.25f, 0.0f, 2.25f), .vel = glm::vec3(0.0f, 1.0f, 0.0f), .mass = 0.2f, .radius = 1.0f
+				.pos = glm::vec3(-2.25f, 0.0f, 2.25f), .vel = glm::vec3(0.0f, 0.0f, 0.0f), .mass = 0.2f, .radius = 1.0f
 			},
 			.material = { .color = glm::vec3(1.0f, 1.0f, 0.0f), .specular_strength = 0.5f, .shininess = 32.0f, }
 		});
@@ -1807,29 +1971,18 @@ int main() {
 				.scale = glm::vec3(1.0f), .rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f), .translation = glm::vec3(0.0f) 
 			},
 			.physics = {
-				.pos = glm::vec3(-2.25f, 0.0f, -2.25f), .vel = glm::vec3(0.0f, -1.0f, 0.0f), .mass = 0.2f, .radius = 1.0f
+				.pos = glm::vec3(-2.25f, 0.0f, -2.25f), .vel = glm::vec3(0.0f, 0.0f, 0.0f), .mass = 0.2f, .radius = 1.0f
 			},
 			.material = { .color = glm::vec3(1.0f, 0.0f, 1.0f), .specular_strength = 0.5f, .shininess = 32.0f, }
 		});
-
+		
 		handle_t ball4 = objects.add({
 			.transform = {
 				.base = glm::mat4(1.0f),
-				.scale = glm::vec3(0.7f), .rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f), .translation = glm::vec3(0.0f) 
+				.scale = glm::vec3(1.0f), .rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f), .translation = glm::vec3(0.0f) 
 			},
 			.physics = {
-				.pos = glm::vec3(4.0f, 0.0f, -4.0f), .vel = glm::vec3(0.0f, 0.0f, -2.0f), .mass = 0.2f, .radius = 0.7f
-			},
-			.material = { .color = glm::vec3(1.0f, 1.0f, 1.0f), .specular_strength = 0.5f, .shininess = 32.0f, }
-		});
-
-		handle_t ball5 = objects.add({
-			.transform = {
-				.base = glm::mat4(1.0f),
-				.scale = glm::vec3(0.7f), .rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f), .translation = glm::vec3(0.0f) 
-			},
-			.physics = {
-				.pos = glm::vec3(-4.0f, 0.0f, 4.0f), .vel = glm::vec3(0.0f, 0.0f, +2.0f), .mass = 0.2f, .radius = 0.7f
+				.pos = glm::vec3(0.0f, 2.25f, 0.0f), .vel = glm::vec3(0.0f, 0.0f, 0.0f), .mass = 0.2f, .radius = 1.0f
 			},
 			.material = { .color = glm::vec3(1.0f, 0.5f, 0.25f), .specular_strength = 0.5f, .shininess = 32.0f, }
 		});
@@ -1856,24 +2009,13 @@ int main() {
 				.base = glm::mat4(1.0f),
 				.scale = glm::vec3(0.5f),
 				.rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f),
-				.translation = glm::vec3(4.0f, 0.0f, 0.0f)
+				.translation = glm::vec3(0.0f, 0.0f, 0.0f)
 			},
 			.material = { .color = glm::vec3(1.0f, 0.0f, 0.0f), .specular_strength = 0.5, .shininess = 32.0f },
-			.attractor = { .pos = glm::vec3(+4.0f, 0.0f, 0.0f), .gm = 70.0f, .min_dist = 2.0, .max_dist = 200.0f }
+			.attractor = { .pos = glm::vec3(0.0f, 0.0f, 0.0f), .gm = 50.0f, .min_dist = 1.0, .max_dist = 200.0f }
 		});
 
-		handle_t attractor1 = objects.add({
-			.transform = {
-				.base = glm::mat4(1.0f),
-				.scale = glm::vec3(0.5f),
-				.rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f),
-				.translation = glm::vec3(-4.0f, 0.0f, 0.0f)
-			},
-			.material = { .color = glm::vec3(1.0f, 0.0f, 0.0f), .specular_strength = 0.5, .shininess = 32.0f },
-			.attractor = { .pos = glm::vec3(-4.0f, 0.0f, 0.0f), .gm = 70.0f, .min_dist = 2.0, .max_dist = 200.0f }
-		});
-
-		std::unordered_set<handle_t> basic_renderables = {ball0, ball1, ball2, ball3, ball4, ball5, attractor0};
+		std::unordered_set<handle_t> basic_renderables = {ball0, ball1, ball2, ball4, attractor0};
 
 		basic_render_seq_t render_seq(program_ptr);
 		render_seq.set_general_setup([&] (shader_program_t& program) {
@@ -1907,13 +2049,18 @@ int main() {
 		vel_ver_int.add_attractor(attractor0);
 
 		physics_system_info_t physics_system_info{
-			.eps = 1e-6,
-			.overlap_coef = 0.3,
-			.overlap_thresh = 1e-4,
-			.overlap_spring_coef = 0.2,
+			.eps = 1e-6f,
+			.overlap_coef = 0.3f,
+			.overlap_thresh = 1e-3f,
+			.overlap_spring_coef = 0.01f,
 			.overlap_resolution_iters = 5,
-			.movement_limit = 10.0f,
-			.velocity_limit = 10.0f,
+			.movement_limit = 50.0f,
+			.velocity_limit = 50.0f,
+			.touch_thresh = 0.01,
+			.touch_coef_workaround = 0.5f,
+			.impulse_cor = 0.7f,
+			.impact_thresh = 1e-3f,
+			.dt_split = 4,
 			.integrator = vel_ver_int,
 		};
 		physics_system_t physics(physics_system_info);
@@ -1921,14 +2068,12 @@ int main() {
 		physics.add(ball0);
 		physics.add(ball1);
 		physics.add(ball2);
-		physics.add(ball3);
 		physics.add(ball4);
-		physics.add(ball5);
 
 		while (!window.should_close()) {
 			glfw::poll_events();
 
-			physics.update(0.01f);
+			physics.update(0.004f);
 
 			pass.execute_action([&] (framebuffer_t& fbo) {
 				render_seq.draw();
