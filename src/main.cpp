@@ -1363,14 +1363,9 @@ void main() {
 				return std::nullopt;
 			} auto& [n, u1, u2] = *axes_opt;
 
-			float n_len = glm::length(n), u1_len = glm::length(u1), u2_len = glm::length(u2);
-
 			// compute impulse change
 			glm::vec3 v1 = body1.vel;
 			glm::vec3 v2 = body2.vel;
-
-			float v1_len = glm::length(v1), v2_len = glm::length(v2);
-
 			float m1 = body1.mass;
 			float m2 = body2.mass;
 			float p1 = glm::dot(v1, n);
@@ -1382,9 +1377,6 @@ void main() {
 			float v2n = (m1 * p1 + m2 * p2 - impulse_cor * m1 * dvn) / m;
 			glm::vec3 new_v1 = v1n * n + 0.999f * (glm::dot(v1, u1) * u1 + glm::dot(v1, u2) * u2);
 			glm::vec3 new_v2 = v2n * n + 0.999f * (glm::dot(v2, u1) * u1 + glm::dot(v2, u2) * u2);
-
-			float new_v1_len = glm::length(new_v1), new_v2_len = glm::length(new_v2);
-
 			return resolved_impact_t{new_v1, new_v2};
 		}
 
@@ -1409,51 +1401,30 @@ void main() {
 			return overlap_t{r, rad0, rad1, a, b};
 		}
 
-		void resolve_overlaps(float dt) {
-			for (int i = 0; i < objects.size(); i++) {
-				auto& body_i = cached_objects[i]->physics;
-				for (int j = i + 1; j < objects.size(); j++) {
-					auto& body_j = cached_objects[j]->physics;
-					
-					auto overlap_opt = get_sphere_sphere_overlap(body_i.pos, body_i.radius, body_j.pos, body_j.radius, eps);
-					if (!overlap_opt) {
-						continue;
+		void resolve_overlaps() {
+			for (int k = 0; k < overlap_resolution_iters; k++) {
+				for (int i = 0; i < objects.size(); i++) {
+					auto& body_i = cached_objects[i]->physics;
+					for (int j = i + 1; j < objects.size(); j++) {
+						auto& body_j = cached_objects[j]->physics;
+						
+						auto overlap_opt = get_sphere_sphere_overlap(body_i.pos, body_i.radius, body_j.pos, body_j.radius, eps);
+						if (!overlap_opt) {
+							continue;
+						}
+
+						float coef = 0.5f * overlap_coef * (overlap_opt->b - overlap_opt->a) / overlap_opt->r;
+						glm::vec3 dr = coef * (body_i.pos - body_j.pos);
+
+						float ki = body_i.mass / (body_i.mass + body_j.mass);
+						float kj = body_j.mass / (body_i.mass + body_j.mass);
+						body_i.pos += ki * dr;
+						body_j.pos -= kj * dr;
+						if (auto vels = resolve_impact(body_i, body_j)) {
+							body_i.vel = vels->v1;
+							body_j.vel = vels->v2;
+						}
 					}
-
-					float coef = 0.5f * overlap_coef * (overlap_opt->b - overlap_opt->a) / overlap_opt->r;
-					glm::vec3 dr = coef * (body_i.pos - body_j.pos);
-
-					float ki = body_i.mass / (body_i.mass + body_j.mass);
-					float kj = body_j.mass / (body_i.mass + body_j.mass);
-					body_i.pos += ki * dr;
-					body_j.pos -= kj * dr;
-					if (auto vels = resolve_impact(body_i, body_j)) {
-						body_i.vel = vels->v1;
-						body_j.vel = vels->v2;
-					}
-				}
-			}
-
-			// apply spring to unresolved overlaps
-			for (int i = 0; i < objects.size(); i++) {
-				auto& body_i = cached_objects[i]->physics;
-				for (int j = i + 1; j < objects.size(); j++) {
-					auto& body_j = cached_objects[j]->physics;
-
-					glm::vec3 dr = body_i.pos - body_j.pos;
-					float r = glm::dot(dr, dr);
-					float r1r2 = body_i.radius + body_j.radius;
-					if (r > r1r2 * r1r2) {
-						continue;
-					}
-
-					r = std::sqrt(r);
-					dr /= r;
-
-					// spring model
-					float k = overlap_spring_coef * (r - r1r2);
-					body_i.force += +k * dr;
-					body_j.force += -k * dr;
 				}
 			}
 		}
@@ -1489,8 +1460,11 @@ void main() {
 				physics.vel = updated.vel;
 				physics.force = glm::vec3(0.0f);
 
-				if (glm::length(physics.pos) > 300.0f) {
-					physics.pos = glm::vec3(0.0f);
+				if (glm::any(glm::isnan(physics.pos))) {
+					physics.pos = glm::vec3(5.0f);
+					physics.vel = glm::vec3(0.0f);
+				} if (glm::length(physics.pos) > 100.0f) {
+					physics.pos -= 50.0f * glm::normalize(physics.pos);
 				}
 			}
 		}
@@ -1505,7 +1479,7 @@ void main() {
 		void update(float dt) {
 			cache_objects();
 			for (int i = 0; i < dt_split; i++) {
-				resolve_overlaps(dt / dt_split);
+				resolve_overlaps();
 				get_integrator_updates(dt / dt_split);
 				update_physics();
 			} sync();
@@ -1658,10 +1632,10 @@ void main() {
 		object_t ball{
 			.transform = {
 				.base = glm::mat4(1.0f),
-				.scale = glm::vec3(0.5f), .rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f), .translation = glm::vec3(0.0f) 
+				.scale = glm::vec3(0.30f), .rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f), .translation = glm::vec3(0.0f) 
 			},
 			.physics = {
-				.pos = glm::vec3(-5.0f, 0.0f, 0.0f), .vel = glm::vec3(0.0f, 0.0f, 0.0f), .mass = 1.0f, .radius = 0.5f
+				.pos = glm::vec3(-5.0f, 0.0f, 0.0f), .vel = glm::vec3(0.0f, 0.0f, 0.0f), .mass = 1.0f, .radius = 0.35f
 			},
 			.material = { .color = glm::vec3(0.0f, 1.0f, 0.0f), .specular_strength = 0.5f, .shininess = 32.0f, }
 		};
@@ -1832,13 +1806,12 @@ int main() {
 		physics_system_info_t physics_system_info{
 			.eps = 1e-6f,
 			.overlap_coef = 0.5f,
-			.overlap_spring_coef = 10.0f,
 			.overlap_resolution_iters = 4,
 			.movement_limit = 100.0f,
 			.velocity_limit = 100.0f,
-			.impulse_cor = 0.75f,
+			.impulse_cor = 0.9f,
 			.impact_thresh = 1e-3f,
-			.dt_split = 8,
+			.dt_split = 4,
 			.integrator = vel_ver_int,
 		};
 		physics_system_t physics(physics_system_info);
