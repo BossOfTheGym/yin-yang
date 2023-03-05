@@ -1323,29 +1323,113 @@ void main() {
 			} dirty = false;
 		}
 
+		struct collision_axes_t {
+			glm::vec3 n{}, u1{}, u2{};
+		};
+
+		std::optional<collision_axes_t> get_collision_axes(const physics_t& body1, const physics_t& body2) {
+			glm::vec3 n = body2.pos - body1.pos;
+			float n_len = glm::length(n);
+			if (n_len > eps) {
+				n /= n_len;
+			} else {
+				return std::nullopt;
+			}
+
+			glm::vec3 u1 = glm::cross(n, body1.vel); // zero-vector or colinear vector cases go here 
+			float u1_len = glm::length(u1);
+			if (u1_len < eps) {
+				u1 = glm::cross(n, body2.vel); // zero-vector or colinear vector cases go here
+				u1_len = glm::length(u1);
+			} if (u1_len > eps) {
+				u1 /= u1_len;
+			} else {
+				return collision_axes_t{n, glm::vec3(0.0f), glm::vec3(0.0f)}; // both velocities colinear with normal
+			}
+
+			glm::vec3 u2 = glm::normalize(glm::cross(n, u1)); // guaranteed to exist
+			return collision_axes_t{n, u1, u2};
+		}
+
+		struct resolved_impact_t {
+			glm::vec3 v1{};
+			glm::vec3 v2{};
+		};
+
+		std::optional<resolved_impact_t> resolve_impact(const physics_t& body1, const physics_t& body2) {
+			// axes we project our velocities on
+			auto axes_opt = get_collision_axes(body1, body2);
+			if (!axes_opt) {
+				return std::nullopt;
+			} auto& [n, u1, u2] = *axes_opt;
+
+			float n_len = glm::length(n), u1_len = glm::length(u1), u2_len = glm::length(u2);
+
+			// compute impulse change
+			glm::vec3 v1 = body1.vel;
+			glm::vec3 v2 = body2.vel;
+
+			float v1_len = glm::length(v1), v2_len = glm::length(v2);
+
+			float m1 = body1.mass;
+			float m2 = body2.mass;
+			float p1 = glm::dot(v1, n);
+			float p2 = glm::dot(v2, n);
+			glm::vec3 dv = v2 - v1;
+			float m = m1 + m2;
+			float dvn = glm::dot(dv, n);
+			float v1n = (m1 * p1 + m2 * p2 + impulse_cor * m2 * dvn) / m;
+			float v2n = (m1 * p1 + m2 * p2 - impulse_cor * m1 * dvn) / m;
+			glm::vec3 new_v1 = v1n * n + glm::dot(v1, u1) * u1 + glm::dot(v1, u2) * u2;
+			glm::vec3 new_v2 = v2n * n + glm::dot(v2, u1) * u1 + glm::dot(v2, u2) * u2;
+
+			float new_v1_len = glm::length(new_v1), new_v2_len = glm::length(new_v2);
+
+			return resolved_impact_t{new_v1, new_v2};
+		}
+
+		// r - distance between objects
+		// r0 - radius (proj) of the first object
+		// r1 - radius (proj) of the second object 
+		// a - first point of overlap segment
+		// b - second point of overlap segment
+		struct overlap_t {
+			float r{}, r0{}, r1{}, a{}, b{};
+		};
+
+		std::optional<overlap_t> get_sphere_sphere_overlap(const glm::vec3& r0, float rad0, const glm::vec3& r1, float rad1, float eps) {
+			glm::vec3 dr = r1 - r0;
+			float rr = glm::dot(dr, dr);
+			if (rr - (rad0 + rad1) * (rad0 + rad1) > 0.0) {
+				return std::nullopt;
+			}
+			float r = std::sqrt(rr);
+			float a = std::max(-rad0, r - rad1);
+			float b = std::min(+rad0, r + rad1);
+			return overlap_t{r, rad0, rad1, a, b};
+		}
+
 		void resolve_overlaps(float dt) {
-			for (int k = 0; k < overlap_resolution_iters; k++) {
-				for (int i = 0; i < objects.size(); i++) {
-					auto& body_i = cached_objects[i]->physics;
-					for (int j = i + 1; j < objects.size(); j++) {
-						auto& body_j = cached_objects[j]->physics;
-						
-						glm::vec3 dr = body_i.pos - body_j.pos;
-						float r = glm::dot(dr, dr);
-						float r1r2 = body_i.radius + body_j.radius;
-						if (r > r1r2 * r1r2) {
-							continue;
-						}
+			for (int i = 0; i < objects.size(); i++) {
+				auto& body_i = cached_objects[i]->physics;
+				for (int j = i + 1; j < objects.size(); j++) {
+					auto& body_j = cached_objects[j]->physics;
+					
+					auto overlap_opt = get_sphere_sphere_overlap(body_i.pos, body_i.radius, body_j.pos, body_j.radius, eps);
+					if (!overlap_opt) {
+						continue;
+					}
 
-						r = std::sqrt(r);
-						dr *= 0.5 * (r > overlap_thresh ? overlap_coef : 1.0f);
+					float coef = 0.5f * (overlap_opt->b - overlap_opt->a) / overlap_opt->r;
+					glm::vec3 dr = coef * (body_i.pos - body_j.pos);
 
-						float ki = body_i.mass / (body_i.mass + body_j.mass);
-						float kj = body_j.mass / (body_i.mass + body_j.mass);
-						body_i.pos += ki * dr;
-						body_i.vel += ki * dr / (dt / overlap_resolution_iters);
-						body_j.pos -= kj * dr;
-						body_j.vel -= kj * dr / (dt / overlap_resolution_iters);
+					float ki = body_i.mass / (body_i.mass + body_j.mass);
+					float kj = body_j.mass / (body_i.mass + body_j.mass);
+					body_i.pos += ki * dr;
+					body_j.pos -= kj * dr;
+					if (auto vels = resolve_impact(body_i, body_j)) {
+						body_i.vel = vels->v1;
+						body_j.vel = vels->v2;
 					}
 				}
 			}
@@ -1355,7 +1439,7 @@ void main() {
 				auto& body_i = cached_objects[i]->physics;
 				for (int j = i + 1; j < objects.size(); j++) {
 					auto& body_j = cached_objects[j]->physics;
-					
+
 					glm::vec3 dr = body_i.pos - body_j.pos;
 					float r = glm::dot(dr, dr);
 					float r1r2 = body_i.radius + body_j.radius;
@@ -1565,6 +1649,26 @@ void main() {
 	// TODO : instanced drawing
 	// TODO : create first pass : draw everything into the G-buffer
 	// TODO : create second pass : apply light
+
+	std::vector<object_t> create_balls() {
+		object_t ball{
+			.transform = {
+				.base = glm::mat4(1.0f),
+				.scale = glm::vec3(1.0f), .rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f), .translation = glm::vec3(0.0f) 
+			},
+			.physics = {
+				.pos = glm::vec3(-5.0f, 0.0f, 0.0f), .vel = glm::vec3(0.0f, 0.0f, 0.0f), .mass = 0.2f, .radius = 1.0f
+			},
+			.material = { .color = glm::vec3(0.0f, 0.0f, 1.0f), .specular_strength = 0.5f, .shininess = 32.0f, }
+		};
+		std::vector<object_t> balls;
+		for (int i = 0; i < 20; i++) {
+			float r = 10.0f;
+			float angle = glm::radians(360.0f) / 20.0f * i;
+			ball.physics.pos = glm::vec3(r * std::cos(angle), 0.0f, r * std::sin(angle));
+			balls.push_back(ball);
+		} return balls;
+	}
 }
 
 int main() {
@@ -1642,61 +1746,6 @@ int main() {
 
 		handle_storage_t<object_t> objects;
 
-		handle_t ball0 = objects.add({
-			.transform = {
-				.base = glm::mat4(1.0f),
-				.scale = glm::vec3(1.0f), .rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f), .translation = glm::vec3(0.0f) 
-			},
-			.physics = {
-				.pos = glm::vec3(2.25f, 0.0f, 2.25f), .vel = glm::vec3(0.0f, 0.0f, 0.0f), .mass = 0.2f, .radius = 1.0f,
-			},
-			.material = { .color = glm::vec3(0.0f, 1.0f, 0.0f), .specular_strength = 0.5f, .shininess = 32.0f, }
-		});
-
-		handle_t ball1 = objects.add({
-			.transform = {
-				.base = glm::mat4(1.0f),
-				.scale = glm::vec3(1.0f), .rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f), .translation = glm::vec3(0.0f) 
-			},
-			.physics = {
-				.pos = glm::vec3(2.25f, 0.0f, -2.25f), .vel = glm::vec3(0.0f, 0.0f, 0.0f), .mass = 0.2f, .radius = 1.0f
-			},
-			.material = { .color = glm::vec3(0.0f, 0.0f, 1.0f), .specular_strength = 0.5f, .shininess = 32.0f, }
-		});
-
-		handle_t ball2 = objects.add({
-			.transform = {
-				.base = glm::mat4(1.0f),
-				.scale = glm::vec3(1.0f), .rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f), .translation = glm::vec3(0.0f) 
-			},
-			.physics = {
-				.pos = glm::vec3(-2.25f, 0.0f, 2.25f), .vel = glm::vec3(0.0f, 0.0f, 0.0f), .mass = 0.2f, .radius = 1.0f
-			},
-			.material = { .color = glm::vec3(1.0f, 1.0f, 0.0f), .specular_strength = 0.5f, .shininess = 32.0f, }
-		});
-
-		handle_t ball3 = objects.add({
-			.transform = {
-				.base = glm::mat4(1.0f),
-				.scale = glm::vec3(1.0f), .rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f), .translation = glm::vec3(0.0f) 
-			},
-			.physics = {
-				.pos = glm::vec3(-2.25f, 0.0f, -2.25f), .vel = glm::vec3(0.0f, 0.0f, 0.0f), .mass = 0.2f, .radius = 1.0f
-			},
-			.material = { .color = glm::vec3(1.0f, 0.0f, 1.0f), .specular_strength = 0.5f, .shininess = 32.0f, }
-		});
-		
-		handle_t ball4 = objects.add({
-			.transform = {
-				.base = glm::mat4(1.0f),
-				.scale = glm::vec3(1.0f), .rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f), .translation = glm::vec3(0.0f) 
-			},
-			.physics = {
-				.pos = glm::vec3(0.0f, 2.25f, 0.0f), .vel = glm::vec3(0.0f, 0.0f, 0.0f), .mass = 0.2f, .radius = 1.0f
-			},
-			.material = { .color = glm::vec3(1.0f, 0.5f, 0.25f), .specular_strength = 0.5f, .shininess = 32.0f, }
-		});
-
 		handle_t viewer = objects.add({
 			.camera = {
 				.fov = 75.0f, .aspect_ratio = (float)fbo_width / fbo_height, .near = 1.0f, .far = 300.0f,
@@ -1722,10 +1771,18 @@ int main() {
 				.translation = glm::vec3(0.0f, 0.0f, 0.0f)
 			},
 			.material = { .color = glm::vec3(1.0f, 0.0f, 0.0f), .specular_strength = 0.5, .shininess = 32.0f },
-			.attractor = { .pos = glm::vec3(0.0f, 0.0f, 0.0f), .gm = 200.0f, .min_dist = 1.0, .max_dist = 200.0f }
+			.attractor = { .pos = glm::vec3(0.0f, 0.0f, 0.0f), .gm = 300.0f, .min_dist = 1.0, .max_dist = 200.0f }
 		});
 
-		std::unordered_set<handle_t> basic_renderables = {ball0, ball1, ball2, ball4, attractor0};
+		std::vector<handle_t> balls;
+		for (auto& obj : create_balls()) {
+			balls.push_back(objects.add(obj));
+		}
+
+		std::unordered_set<handle_t> basic_renderables = {attractor0};
+		for (auto handle : balls) {
+			basic_renderables.insert(handle);
+		}
 
 		basic_render_seq_t render_seq(program_ptr);
 		render_seq.set_general_setup([&] (shader_program_t& program) {
@@ -1765,20 +1822,21 @@ int main() {
 			.overlap_resolution_iters = 4,
 			.movement_limit = 100.0f,
 			.velocity_limit = 100.0f,
-			.dt_split = 4,
+			.impulse_cor = 0.5f,
+			.impact_thresh = 1e-3f,
+			.dt_split = 1,
 			.integrator = vel_ver_int,
 		};
 		physics_system_t physics(physics_system_info);
 		physics.set_object_accessor(object_accessor);
-		physics.add(ball0);
-		physics.add(ball1);
-		physics.add(ball2);
-		physics.add(ball4);
+		for (auto& handle : balls) {
+			physics.add(handle);
+		}
 
 		while (!window.should_close()) {
 			glfw::poll_events();
 
-			physics.update(0.004f);
+			physics.update(0.003f);
 
 			pass.execute_action([&] (framebuffer_t& fbo) {
 				render_seq.draw();
