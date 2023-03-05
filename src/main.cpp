@@ -1380,8 +1380,8 @@ void main() {
 			float dvn = glm::dot(dv, n);
 			float v1n = (m1 * p1 + m2 * p2 + impulse_cor * m2 * dvn) / m;
 			float v2n = (m1 * p1 + m2 * p2 - impulse_cor * m1 * dvn) / m;
-			glm::vec3 new_v1 = v1n * n + glm::dot(v1, u1) * u1 + glm::dot(v1, u2) * u2;
-			glm::vec3 new_v2 = v2n * n + glm::dot(v2, u1) * u1 + glm::dot(v2, u2) * u2;
+			glm::vec3 new_v1 = v1n * n + 0.999f * (glm::dot(v1, u1) * u1 + glm::dot(v1, u2) * u2);
+			glm::vec3 new_v2 = v2n * n + 0.999f * (glm::dot(v2, u1) * u1 + glm::dot(v2, u2) * u2);
 
 			float new_v1_len = glm::length(new_v1), new_v2_len = glm::length(new_v2);
 
@@ -1420,7 +1420,7 @@ void main() {
 						continue;
 					}
 
-					float coef = 0.5f * (overlap_opt->b - overlap_opt->a) / overlap_opt->r;
+					float coef = 0.5f * overlap_coef * (overlap_opt->b - overlap_opt->a) / overlap_opt->r;
 					glm::vec3 dr = coef * (body_i.pos - body_j.pos);
 
 					float ki = body_i.mass / (body_i.mass + body_j.mass);
@@ -1488,6 +1488,10 @@ void main() {
 				physics.pos = updated.pos;
 				physics.vel = updated.vel;
 				physics.force = glm::vec3(0.0f);
+
+				if (glm::length(physics.pos) > 300.0f) {
+					physics.pos = glm::vec3(0.0f);
+				}
 			}
 		}
 
@@ -1654,18 +1658,28 @@ void main() {
 		object_t ball{
 			.transform = {
 				.base = glm::mat4(1.0f),
-				.scale = glm::vec3(1.0f), .rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f), .translation = glm::vec3(0.0f) 
+				.scale = glm::vec3(0.5f), .rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f), .translation = glm::vec3(0.0f) 
 			},
 			.physics = {
-				.pos = glm::vec3(-5.0f, 0.0f, 0.0f), .vel = glm::vec3(0.0f, 0.0f, 0.0f), .mass = 0.2f, .radius = 1.0f
+				.pos = glm::vec3(-5.0f, 0.0f, 0.0f), .vel = glm::vec3(0.0f, 0.0f, 0.0f), .mass = 1.0f, .radius = 0.5f
 			},
-			.material = { .color = glm::vec3(0.0f, 0.0f, 1.0f), .specular_strength = 0.5f, .shininess = 32.0f, }
+			.material = { .color = glm::vec3(0.0f, 1.0f, 0.0f), .specular_strength = 0.5f, .shininess = 32.0f, }
 		};
 		std::vector<object_t> balls;
-		for (int i = 0; i < 20; i++) {
-			float r = 10.0f;
-			float angle = glm::radians(360.0f) / 20.0f * i;
-			ball.physics.pos = glm::vec3(r * std::cos(angle), 0.0f, r * std::sin(angle));
+
+		int repeat = 20;
+		int count = 300;
+		float vel = 20.0f;
+		glm::vec3 base = glm::vec3(1.0f);
+		for (int i = 0; i < count; i++) {
+			float r = 0.2 * (i);
+			float angle = glm::radians(360.0f) / repeat * (i % repeat);
+
+			float x = r * std::cos(angle);
+			float y = r;
+			float z = r * std::sin(angle);
+			ball.physics.pos = base + glm::vec3(x, y, z);
+			ball.physics.vel = -vel * glm::normalize(ball.physics.pos);
 			balls.push_back(ball);
 		} return balls;
 	}
@@ -1749,9 +1763,9 @@ int main() {
 		handle_t viewer = objects.add({
 			.camera = {
 				.fov = 75.0f, .aspect_ratio = (float)fbo_width / fbo_height, .near = 1.0f, .far = 300.0f,
-				.eye = glm::vec3(0.0f, 20.0f, 0.0f),
+				.eye = glm::vec3(20.0f, 0.0f, 0.0f),
 				.center = glm::vec3(0.0f, 0.0f, 0.0f),
-				.up = glm::vec3(0.0f, 0.0f, 1.0f)
+				.up = glm::vec3(0.0f, 1.0f, 0.0f)
 			}
 		});
 
@@ -1771,7 +1785,7 @@ int main() {
 				.translation = glm::vec3(0.0f, 0.0f, 0.0f)
 			},
 			.material = { .color = glm::vec3(1.0f, 0.0f, 0.0f), .specular_strength = 0.5, .shininess = 32.0f },
-			.attractor = { .pos = glm::vec3(0.0f, 0.0f, 0.0f), .gm = 300.0f, .min_dist = 1.0, .max_dist = 200.0f }
+			.attractor = { .pos = glm::vec3(0.0f, 0.0f, 0.0f), .gm = 1000.0f, .min_dist = 1.0, .max_dist = 200.0f }
 		});
 
 		std::vector<handle_t> balls;
@@ -1818,13 +1832,13 @@ int main() {
 		physics_system_info_t physics_system_info{
 			.eps = 1e-6f,
 			.overlap_coef = 0.5f,
-			.overlap_spring_coef = 2.0f,
+			.overlap_spring_coef = 10.0f,
 			.overlap_resolution_iters = 4,
 			.movement_limit = 100.0f,
 			.velocity_limit = 100.0f,
-			.impulse_cor = 0.5f,
+			.impulse_cor = 0.75f,
 			.impact_thresh = 1e-3f,
-			.dt_split = 1,
+			.dt_split = 8,
 			.integrator = vel_ver_int,
 		};
 		physics_system_t physics(physics_system_info);
@@ -1836,7 +1850,7 @@ int main() {
 		while (!window.should_close()) {
 			glfw::poll_events();
 
-			physics.update(0.003f);
+			physics.update(0.01f);
 
 			pass.execute_action([&] (framebuffer_t& fbo) {
 				render_seq.draw();
