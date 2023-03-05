@@ -1375,8 +1375,8 @@ void main() {
 			float dvn = glm::dot(dv, n);
 			float v1n = (m1 * p1 + m2 * p2 + impulse_cor * m2 * dvn) / m;
 			float v2n = (m1 * p1 + m2 * p2 - impulse_cor * m1 * dvn) / m;
-			glm::vec3 new_v1 = v1n * n + 0.999f * (glm::dot(v1, u1) * u1 + glm::dot(v1, u2) * u2);
-			glm::vec3 new_v2 = v2n * n + 0.999f * (glm::dot(v2, u1) * u1 + glm::dot(v2, u2) * u2);
+			glm::vec3 new_v1 = v1n * n + 0.99f * (glm::dot(v1, u1) * u1 + glm::dot(v1, u2) * u2);
+			glm::vec3 new_v2 = v2n * n + 0.99f * (glm::dot(v2, u1) * u1 + glm::dot(v2, u2) * u2);
 			return resolved_impact_t{new_v1, new_v2};
 		}
 
@@ -1427,6 +1427,29 @@ void main() {
 					}
 				}
 			}
+
+			// apply spring to unresolved overlaps
+			for (int i = 0; i < objects.size(); i++) {
+				auto& body_i = cached_objects[i]->physics;
+				for (int j = i + 1; j < objects.size(); j++) {
+					auto& body_j = cached_objects[j]->physics;
+
+					glm::vec3 dr = body_i.pos - body_j.pos;
+					float r = glm::dot(dr, dr);
+					float r1r2 = body_i.radius + body_j.radius;
+					if (r > r1r2 * r1r2) {
+						continue;
+					}
+
+					r = std::sqrt(r);
+					dr /= r;
+
+					// spring model
+					float k = overlap_spring_coef * (r - r1r2);
+					body_i.force += +k * dr;
+					body_j.force += -k * dr;
+				}
+			}
 		}
 
 		glm::vec3 limit_vec(const glm::vec3& vec, float max_len) const {
@@ -1464,7 +1487,9 @@ void main() {
 					physics.pos = glm::vec3(5.0f);
 					physics.vel = glm::vec3(0.0f);
 				} if (glm::length(physics.pos) > 100.0f) {
-					physics.pos -= 50.0f * glm::normalize(physics.pos);
+					glm::vec3 dir = glm::normalize(physics.pos);
+					physics.pos -= 50.0f * dir;
+					physics.vel = -std::abs(glm::dot(physics.vel, dir)) * dir;
 				}
 			}
 		}
@@ -1632,21 +1657,21 @@ void main() {
 		object_t ball{
 			.transform = {
 				.base = glm::mat4(1.0f),
-				.scale = glm::vec3(0.30f), .rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f), .translation = glm::vec3(0.0f) 
+				.scale = glm::vec3(0.20f), .rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f), .translation = glm::vec3(0.0f) 
 			},
 			.physics = {
-				.pos = glm::vec3(-5.0f, 0.0f, 0.0f), .vel = glm::vec3(0.0f, 0.0f, 0.0f), .mass = 1.0f, .radius = 0.35f
+				.pos = glm::vec3(-5.0f, 0.0f, 0.0f), .vel = glm::vec3(0.0f, 0.0f, 0.0f), .mass = 1.0f, .radius = 0.25f
 			},
 			.material = { .color = glm::vec3(0.0f, 1.0f, 0.0f), .specular_strength = 0.5f, .shininess = 32.0f, }
 		};
 		std::vector<object_t> balls;
 
 		int repeat = 20;
-		int count = 300;
+		int count = 1500;
 		float vel = 20.0f;
 		glm::vec3 base = glm::vec3(1.0f);
 		for (int i = 0; i < count; i++) {
-			float r = 0.2 * (i);
+			float r = 0.15 * (i);
 			float angle = glm::radians(360.0f) / repeat * (i % repeat);
 
 			float x = r * std::cos(angle);
@@ -1805,13 +1830,13 @@ int main() {
 
 		physics_system_info_t physics_system_info{
 			.eps = 1e-6f,
-			.overlap_coef = 0.5f,
-			.overlap_resolution_iters = 4,
+			.overlap_coef = 0.4f,
+			.overlap_resolution_iters = 1,
 			.movement_limit = 100.0f,
 			.velocity_limit = 100.0f,
 			.impulse_cor = 0.9f,
 			.impact_thresh = 1e-3f,
-			.dt_split = 4,
+			.dt_split = 1,
 			.integrator = vel_ver_int,
 		};
 		physics_system_t physics(physics_system_info);
