@@ -107,7 +107,7 @@ namespace {
 	};
 
 	struct framebuffer_widget_t {
-		static constexpr ImGuiWindowFlags flags_init = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings;
+		static constexpr ImGuiWindowFlags flags_init = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_AlwaysAutoResize;
 
 		void render(ImTextureID id, int width, int height) {
 			if (!opened) {
@@ -115,7 +115,7 @@ namespace {
 			}
 
 			ImGui::SetNextWindowPos(ImVec2(0, 0));
-			ImGui::SetNextWindowSize(ImVec2(width + 10, height + 10));
+			//ImGui::SetNextWindowSize(ImVec2(width + 10, height + 10));
 			if (ImGui::Begin("Framebuffer", &opened, flags)) {
 				// workaround to flip texture
 				ImVec2 pos = ImGui::GetCursorPos();
@@ -1024,6 +1024,10 @@ void main() {
 		float gm{};
 		float min_dist{};
 		float max_dist{};
+		float drag_min_coef{};
+		float drag_max_coef{};
+		float drag_min_dist{};
+		float drag_max_dist{};
 	};
 
 	// directional force
@@ -1172,12 +1176,17 @@ void main() {
 			for (auto handle : attractor_handles) {
 				auto& attractor = object_accessor(handle)->attractor;
 				glm::vec3 dr = attractor.pos - state.pos;
-				float dr_mag = glm::length(dr);
 				float dr_mag2 = glm::dot(dr, dr);
+				float dr_mag = std::sqrt(dr_mag2);
 				if (attractor.min_dist <= dr_mag && dr_mag <= attractor.max_dist) {
 					acc += attractor.gm / dr_mag2 * dr / dr_mag;
-				} else {
-					acc += -state.vel;
+				} if (attractor.drag_min_dist <= dr_mag && dr_mag <= attractor.drag_max_dist) {
+					float c0 = attractor.drag_min_coef;
+					float c1 = attractor.drag_max_coef;
+					float d0 = attractor.drag_min_dist;
+					float d1 = attractor.drag_max_dist;
+					float coef = (1.0f - c1 + c0) * glm::smoothstep(d1, d0, dr_mag) + c0;
+					acc -= coef * state.vel;
 				}
 			} for (auto handle : force_handles) {
 				auto& force = object_accessor(handle)->force;
@@ -1335,6 +1344,14 @@ void main() {
 			glm::vec3 n{}, u1{}, u2{};
 		};
 
+		glm::vec3 get_collision_axis(const physics_t& body1, const physics_t& body2) {
+			glm::vec3 n = body2.pos - body1.pos;
+			float n_len = glm::length(n);
+			if (n_len > eps) {
+				return n / n_len;
+			} return glm::vec3(0.0f);
+		}
+
 		std::optional<collision_axes_t> get_collision_axes(const physics_t& body1, const physics_t& body2) {
 			glm::vec3 n = body2.pos - body1.pos;
 			float n_len = glm::length(n);
@@ -1368,7 +1385,7 @@ void main() {
 			glm::vec3 v{}; float m{};
 		};
 
-		std::optional<impact_data_t> resolve_impact(const physics_t& body1, const physics_t& body2) {
+		std::optional<impact_data_t> resolve_impact_advanced(const physics_t& body1, const physics_t& body2) {
 			// axes we project our velocities on
 			auto axes_opt = get_collision_axes(body1, body2);
 			if (!axes_opt) {
@@ -1378,21 +1395,44 @@ void main() {
 			// compute impulse change
 			glm::vec3 v1 = body1.vel;
 			glm::vec3 v2 = body2.vel;
-			glm::vec3 dv = v2 - v1;
-			float dvn = glm::dot(dv, n);
-			if (std::abs(dvn) < impact_thresh) {
-				return std::nullopt;
-			}
-
+			float v1n = glm::dot(v1, n);
+			float v2n = glm::dot(v2, n);
+			float dvn = glm::dot(v2 - v1, n);
 			float m1 = body1.mass;
 			float m2 = body2.mass;
 			float m = m1 + m2;
-			float p1 = glm::dot(v1, n);
-			float p2 = glm::dot(v2, n);
-			float new_v1n = (m1 * p1 + m2 * p2 + impulse_cor * m2 * dvn) / m;
-			float new_v2n = (m1 * p1 + m2 * p2 - impulse_cor * m1 * dvn) / m;
+			float pn = m1 * v1n + m2 * v2n;
+			float new_v1n = (pn + impulse_cor * m2 * dvn) / m;
+			float new_v2n = (pn - impulse_cor * m1 * dvn) / m;
 			glm::vec3 new_v1 = new_v1n * n + 0.99f * (glm::dot(v1, u1) * u1 + glm::dot(v1, u2) * u2);
 			glm::vec3 new_v2 = new_v2n * n + 0.99f * (glm::dot(v2, u1) * u1 + glm::dot(v2, u2) * u2);
+			return impact_data_t{new_v1, m1, new_v2, m2};
+		}
+
+		std::optional<impact_data_t> resolve_impact(const physics_t& body1, const physics_t& body2) {
+			glm::vec3 n = get_collision_axis(body1, body2);
+			if (glm::dot(n, n) < eps) {
+				return std::nullopt;
+			}
+			// compute impulse change
+			glm::vec3 v1 = body1.vel;
+			glm::vec3 v2 = body2.vel;
+			glm::vec3 dv = v2 - v1;
+			float v1n = glm::dot(v1, n);
+			float v2n = glm::dot(v2, n);
+
+			glm::vec3 t1 = v2n * n + (v1 - v1n * n);
+			glm::vec3 t2 = v2n * n + (v2 - v2n * n);
+
+			float dvn = glm::dot(v2 - v1, n);
+			float m1 = body1.mass;
+			float m2 = body2.mass;
+			float m = m1 + m2;
+			float pn = m1 * v1n + m2 * v2n;
+			float new_v1n = (pn + impulse_cor * m2 * dvn) / m;
+			float new_v2n = (pn - impulse_cor * m1 * dvn) / m;
+			glm::vec3 new_v1 = new_v1n * n + 0.99f * (v1 - v1n * n);
+			glm::vec3 new_v2 = new_v2n * n + 0.99f * (v2 - v2n * n);
 			return impact_data_t{new_v1, m1, new_v2, m2};
 		}
 
@@ -1709,29 +1749,32 @@ void main() {
 	}
 
 	struct int_gen_t {
-		int_gen_t(seed_t seed, int a, int b) : gen(seed), distr(a, b) {}
+		int_gen_t(seed_t seed, int a, int b) : base_gen(seed), distr(a, b) {}
 
 		int gen() {
-			return distr(gen);
+			return distr(base_gen);
 		}
 
-		std::minstd_rand gen;
+		std::minstd_rand base_gen;
 		std::uniform_int_distribution<> distr;
-	}
+	};
 
 	struct float_gen_t {
-		float_gen_t(seed_t seed, float a, float b) : gen(shuffle(seed)), distr(a, b) {}
+		float_gen_t(seed_t seed, float a, float b) : base_gen(shuffle(seed)), distr(a, b) {}
 
 		float gen() {
-			return distr(gen);
+			return distr(base_gen);
 		}
 
-		std::minstd_rand gen;
+		std::minstd_rand base_gen;
 		std::uniform_real_distribution<> distr;
 	};	
 
 	struct rgb_color_gen_t {
-		rgb_color_gen_t(seed_t seed) : r_gen(shuffle(seed)), g_gen(shuffle(seed + 1)), b_gen(shuffle(seed + 2)) {}
+		rgb_color_gen_t(seed_t seed)
+			: r_gen(shuffle(seed    ), 0.0f, 1.0f)
+			, g_gen(shuffle(seed + 1), 0.0f, 1.0f)
+			, b_gen(shuffle(seed + 2), 0.0f, 1.0f) {}
 
 		glm::vec3 gen() {
 			float r = r_gen.gen(), g = g_gen.gen(), b = b_gen.gen();
@@ -1790,7 +1833,7 @@ void main() {
 	using hsv_color_gen_t = hsl_color_gen_t;
 
 	glm::vec3 hsv_to_rgb(const glm::vec3& hsv) {
-		float h = hsl.x, s = hsl.y, v = hsl.z;
+		float h = hsv.x, s = hsv.y, v = hsv.z;
 
 		float c = v * s;
 		float ht = h / 60.0f;
@@ -1819,14 +1862,8 @@ void main() {
 		}
 	};
 
-	struct ball_gen_t {
-		ball_gen_t(seed_t seed) {
-
-		}
-	};
-
 	std::vector<object_t> create_balls() {
-		float s_rad = 0.2f;
+		float s_rad = 0.7f;
 		float p_rad = s_rad + 0.1f;
 		object_t ball{
 			.transform = {
@@ -1841,19 +1878,19 @@ void main() {
 		std::vector<object_t> balls;
 
 		float_gen_t coord_gen(42, -50.0f, +50.0f);
-		hsv_to_rgb_color_gen_t color_gen(42);
+		rgb_color_gen_t color_gen(42);
 
-		int count = 1000;
-		float vel = 50.0f;
+		int count = 500;
+		float vel = 100.0f;
 		glm::vec3 base = glm::vec3(1.0f);
 		for (int i = 0; i < count; i++) {
-			float x = coord_gen();
-			float y = coord_gen();
-			float z = coord_gen();
+			float x = coord_gen.gen();
+			float y = coord_gen.gen();
+			float z = coord_gen.gen();
 			float r = std::sqrt(x * x + y * y + z * z);
 			ball.physics.pos = glm::vec3(x, y, z);
 			ball.physics.vel = -vel * (r > 1e-2 ? ball.physics.pos / r : glm::vec3(0.0f));
-			ball.material.color = color_gen();
+			ball.material.color = color_gen.gen();
 			balls.push_back(ball);
 		} return balls;
 	}
@@ -1953,7 +1990,16 @@ int main() {
 				.translation = glm::vec3(0.0f, 0.0f, 0.0f)
 			},
 			.material = { .color = glm::vec3(1.0f, 0.0f, 0.0f), .specular_strength = 0.5, .shininess = 32.0f },
-			.attractor = { .pos = glm::vec3(0.0f, 0.0f, 0.0f), .gm = 1000.0f, .min_dist = 3.0, .max_dist = 200.0f }
+			.attractor = {
+				.pos = glm::vec3(0.0f, 0.0f, 0.0f),
+				.gm = 1000.0f,
+				.min_dist = 3.0,
+				.max_dist = 300.0f,
+				.drag_min_coef = 0.5f,
+				.drag_max_coef = 0.9f,
+				.drag_min_dist = 2.0f,
+				.drag_max_dist = 7.0f
+			}
 		});
 
 		std::vector<handle_t> balls;
@@ -2001,11 +2047,11 @@ int main() {
 			.eps = 1e-6f,
 			.overlap_coef = 0.4f,
 			.overlap_resolution_iters = 2,
-			.movement_limit = 100.0f,
-			.velocity_limit = 100.0f,
+			.movement_limit = 200.0f,
+			.velocity_limit = 200.0f,
 			.impulse_cor = 0.8f,
 			.impact_thresh = 1e-3f,
-			.dt_split = 2,
+			.dt_split = 3,
 			.integrator = vel_ver_int,
 		};
 		physics_system_t physics(physics_system_info);
