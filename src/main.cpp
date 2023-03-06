@@ -107,13 +107,15 @@ namespace {
 	};
 
 	struct framebuffer_widget_t {
-		static constexpr ImGuiWindowFlags flags_init = 0;
+		static constexpr ImGuiWindowFlags flags_init = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings;
 
 		void render(ImTextureID id, int width, int height) {
 			if (!opened) {
 				return;
 			}
 
+			ImGui::SetNextWindowPos(ImVec2(0, 0));
+			ImGui::SetNextWindowSize(ImVec2(width + 10, height + 10));
 			if (ImGui::Begin("Framebuffer", &opened, flags)) {
 				// workaround to flip texture
 				ImVec2 pos = ImGui::GetCursorPos();
@@ -124,7 +126,7 @@ namespace {
 			} ImGui::End();
 		}
 
-		ImGuiWindowFlags flags{};
+		ImGuiWindowFlags flags{flags_init};
 		bool opened{true};
 	};
 
@@ -1277,7 +1279,7 @@ void main() {
 			, overlap_vel_coef{info.overlap_vel_coef}
 			, overlap_thresh{info.overlap_thresh}
 			, overlap_spring_coef{info.overlap_spring_coef}
-			, overlap_resolution_iters{info.overlap_resolution_iters}
+			, overlap_resolution_iters{std::max(info.overlap_resolution_iters, 1)}
 			, movement_limit{info.movement_limit}
 			, velocity_limit{info.velocity_limit}
 			, touch_thresh{info.touch_thresh}
@@ -1351,12 +1353,16 @@ void main() {
 			return collision_axes_t{n, u1, u2};
 		}
 
-		struct resolved_impact_t {
-			glm::vec3 v1{};
-			glm::vec3 v2{};
+		struct impact_data_t {
+			glm::vec3 v1{}; float m1{};
+			glm::vec3 v2{}; float m2{};
 		};
 
-		std::optional<resolved_impact_t> resolve_impact(const physics_t& body1, const physics_t& body2) {
+		struct impact_t {
+			glm::vec3 v{}; float m{};
+		};
+
+		std::optional<impact_data_t> resolve_impact(const physics_t& body1, const physics_t& body2) {
 			// axes we project our velocities on
 			auto axes_opt = get_collision_axes(body1, body2);
 			if (!axes_opt) {
@@ -1366,18 +1372,22 @@ void main() {
 			// compute impulse change
 			glm::vec3 v1 = body1.vel;
 			glm::vec3 v2 = body2.vel;
+			glm::vec3 dv = v2 - v1;
+			float dvn = glm::dot(dv, n);
+			if (std::abs(dvn) < impact_thresh) {
+				return std::nullopt;
+			}
+
 			float m1 = body1.mass;
 			float m2 = body2.mass;
+			float m = m1 + m2;
 			float p1 = glm::dot(v1, n);
 			float p2 = glm::dot(v2, n);
-			glm::vec3 dv = v2 - v1;
-			float m = m1 + m2;
-			float dvn = glm::dot(dv, n);
-			float v1n = (m1 * p1 + m2 * p2 + impulse_cor * m2 * dvn) / m;
-			float v2n = (m1 * p1 + m2 * p2 - impulse_cor * m1 * dvn) / m;
-			glm::vec3 new_v1 = v1n * n + 0.99f * (glm::dot(v1, u1) * u1 + glm::dot(v1, u2) * u2);
-			glm::vec3 new_v2 = v2n * n + 0.99f * (glm::dot(v2, u1) * u1 + glm::dot(v2, u2) * u2);
-			return resolved_impact_t{new_v1, new_v2};
+			float new_v1n = (m1 * p1 + m2 * p2 + impulse_cor * m2 * dvn) / m;
+			float new_v2n = (m1 * p1 + m2 * p2 - impulse_cor * m1 * dvn) / m;
+			glm::vec3 new_v1 = new_v1n * n + 0.95f * (glm::dot(v1, u1) * u1 + glm::dot(v1, u2) * u2);
+			glm::vec3 new_v2 = new_v2n * n + 0.95f * (glm::dot(v2, u1) * u1 + glm::dot(v2, u2) * u2);
+			return impact_data_t{new_v1, m1, new_v2, m2};
 		}
 
 		// r - distance between objects
@@ -1402,53 +1412,68 @@ void main() {
 		}
 
 		void resolve_overlaps() {
+			last_overlap.resize(objects.size());
+			for (auto& line : last_overlap) {
+				line.clear();
+				line.resize(objects.size(), std::nullopt);
+			}
+			
 			for (int k = 0; k < overlap_resolution_iters; k++) {
 				for (int i = 0; i < objects.size(); i++) {
 					auto& body_i = cached_objects[i]->physics;
 					for (int j = i + 1; j < objects.size(); j++) {
 						auto& body_j = cached_objects[j]->physics;
 						
-						auto overlap_opt = get_sphere_sphere_overlap(body_i.pos, body_i.radius, body_j.pos, body_j.radius, eps);
-						if (!overlap_opt) {
+						last_overlap[i][j] = get_sphere_sphere_overlap(body_i.pos, body_i.radius, body_j.pos, body_j.radius, eps);
+						if (!last_overlap[i][j]) {
 							continue;
-						}
+						} auto& overlap = *last_overlap[i][j];
 
-						float coef = 0.5f * overlap_coef * (overlap_opt->b - overlap_opt->a) / overlap_opt->r;
+						float coef = 0.5f * overlap_coef * (overlap.b - overlap.a) / overlap.r;
 						glm::vec3 dr = coef * (body_i.pos - body_j.pos);
 
 						float ki = body_i.mass / (body_i.mass + body_j.mass);
 						float kj = body_j.mass / (body_i.mass + body_j.mass);
 						body_i.pos += ki * dr;
 						body_j.pos -= kj * dr;
-						if (auto vels = resolve_impact(body_i, body_j)) {
-							body_i.vel = vels->v1;
-							body_j.vel = vels->v2;
-						}
 					}
 				}
 			}
 
-			// apply spring to unresolved overlaps
+			impacts.resize(objects.size());
+			for (auto& line : impacts) {
+				line.clear();
+			}
+
 			for (int i = 0; i < objects.size(); i++) {
 				auto& body_i = cached_objects[i]->physics;
 				for (int j = i + 1; j < objects.size(); j++) {
 					auto& body_j = cached_objects[j]->physics;
 
-					glm::vec3 dr = body_i.pos - body_j.pos;
-					float r = glm::dot(dr, dr);
-					float r1r2 = body_i.radius + body_j.radius;
-					if (r > r1r2 * r1r2) {
+					if (!last_overlap[i][j]) {
 						continue;
 					}
 
-					r = std::sqrt(r);
-					dr /= r;
-
-					// spring model
-					float k = overlap_spring_coef * (r - r1r2);
-					body_i.force += +k * dr;
-					body_j.force += -k * dr;
+					if (auto impact = resolve_impact(body_i, body_j)) {
+						impacts[i].push_back({impact->v1, impact->m2});
+						impacts[j].push_back({impact->v2, impact->m1});
+					}
 				}
+			}
+
+			for (int i = 0; i < objects.size(); i++) {
+				if (impacts[i].empty()) {
+					continue;
+				}
+				float m = 0.0f;
+				for (auto& data : impacts[i]) {
+					m += data.m;
+				}
+				glm::vec3 v = glm::vec3(0.0f);
+				for (auto& data : impacts[i]) {
+					v += data.v * (data.m / m);
+				}
+				cached_objects[i]->physics.vel = v;
 			}
 		}
 
@@ -1532,6 +1557,8 @@ void main() {
 		std::unordered_set<handle_t> objects;
 		std::vector<object_t*> cached_objects;
 		std::vector<handle_t> index_to_handle;
+		std::vector<std::vector<std::optional<overlap_t>>> last_overlap;
+		std::vector<std::vector<impact_t>> impacts;
 		std::vector<body_state_t> integrator_updates;
 	};
 
@@ -1654,24 +1681,25 @@ void main() {
 	// TODO : create second pass : apply light
 
 	std::vector<object_t> create_balls() {
+		float rad = 1.0f;
 		object_t ball{
 			.transform = {
 				.base = glm::mat4(1.0f),
-				.scale = glm::vec3(0.20f), .rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f), .translation = glm::vec3(0.0f) 
+				.scale = glm::vec3(rad), .rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f), .translation = glm::vec3(0.0f) 
 			},
 			.physics = {
-				.pos = glm::vec3(-5.0f, 0.0f, 0.0f), .vel = glm::vec3(0.0f, 0.0f, 0.0f), .mass = 1.0f, .radius = 0.25f
+				.pos = glm::vec3(-5.0f, 0.0f, 0.0f), .vel = glm::vec3(0.0f, 0.0f, 0.0f), .mass = 1.0f, .radius = rad
 			},
 			.material = { .color = glm::vec3(0.0f, 1.0f, 0.0f), .specular_strength = 0.5f, .shininess = 32.0f, }
 		};
 		std::vector<object_t> balls;
 
 		int repeat = 20;
-		int count = 1500;
+		int count = 200;
 		float vel = 20.0f;
 		glm::vec3 base = glm::vec3(1.0f);
 		for (int i = 0; i < count; i++) {
-			float r = 0.15 * (i);
+			float r = i % (repeat + 1);
 			float angle = glm::radians(360.0f) / repeat * (i % repeat);
 
 			float x = r * std::cos(angle);
@@ -1685,12 +1713,10 @@ void main() {
 }
 
 int main() {
-	constexpr int window_width = 1280;
-	constexpr int window_height = 720;
-	constexpr int tex_width = 256;
-	constexpr int tex_height = 256;
-	constexpr int fbo_width = 1100;
-	constexpr int fbo_height = 680;
+	constexpr int window_width = 512;
+	constexpr int window_height = 512;
+	constexpr int fbo_width = 480;
+	constexpr int fbo_height = 480;
 
 	glfw::guard_t glfw_guard;
 	glfw::window_t window(glfw::window_params_t::create_basic_opengl("yin-yang", window_width, window_height, 4, 6));
@@ -1711,10 +1737,6 @@ int main() {
 		demo_widget_t demo;
 		sim_widget_t sim;
 		framebuffer_widget_t framebuffer_widget;
-
-		auto test_tex = ([&] () {
-			return std::make_shared<texture_t>(gen_test_texture(tex_width, tex_height));
-		})();
 
 		auto program_ptr = ([&] () {
 			auto [program, info_log] = gen_basic_shader_program();
