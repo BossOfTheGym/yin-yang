@@ -20,6 +20,7 @@
 #include <iostream>
 #include <exception>
 #include <stdexcept>
+#include <typeindex>
 #include <functional>
 #include <type_traits>
 #include <unordered_map>
@@ -910,6 +911,7 @@ void main() {
 		framebuffer_t fbo;
 		std::vector<pass_setup_t> setups;
 	};
+	
 
 	namespace impl {
 		template<class __handle_t, auto __null_handle>
@@ -970,52 +972,6 @@ void main() {
 	inline constexpr handle_t null_handle = ~0;
 
 	using handle_pool_t = impl::handle_pool_t<handle_t, null_handle>;
-
-	template<class object_t>
-	class handle_storage_t {
-	public:
-		using handles_t = handle_pool_t;	
-		using storage_t = std::unordered_map<handle_t, object_t>;
-
-		// simplified
-		[[nodiscard]] handle_t add(const object_t& object) {
-			handle_t handle = handles.acquire();
-			assert(get(handle) == nullptr);
-			objects[handle] = object;
-			return handle;
-		}
-
-		void del(handle_t handle) {
-			objects.erase(handle);
-			handles.release(handle);
-		}
-
-		object_t* get(handle_t handle) {
-			if (auto it = objects.find(handle); it != objects.end()) {
-				return &it->second;
-			} return nullptr;
-		}
-
-		auto begin() {
-			return objects.begin();
-		}
-
-		auto begin() const {
-			return objects.begin();
-		}
-
-		auto end() {
-			return objects.end();
-		}
-
-		auto end() const {
-			return objects.end();
-		}
-
-	private:
-		handles_t handles;
-		storage_t objects;
-	};
 
 	// point attractor
 	// a = GM / |r - r0|^2 * (r - r0) / |r - r0|
@@ -1108,23 +1064,332 @@ void main() {
 		std::unique_ptr<controller_if_t> impl;
 	};
 
-	// giant abomination, yep, very cheap solution
-	// TODO : dismember?
-	struct object_t {
-		transform_t transform{};
-		physics_t physics{};
-		material_t material{};
-		attractor_t attractor{};
-		force_t force{};
-		camera_t camera{};
-		omnidir_light_t omnilight{};
-		vao_t vao{};
-		controller_if_t controller;
+
+	namespace impl {
+		struct type_id_base_t {
+			inline static std::size_t counter = 0;
+		};
+
+		template<class type_t>
+		struct type_id_t : private type_id_base_t {
+		public:
+			inline static const std::size_t value = type_id_base_t::counter++;
+		};
+	}
+
+	template<class type_t>
+	inline const std::size_t type_id = impl::type_id_t<type_t>::value;
+
+	template<class component_t>
+	class component_entry_t {
+	public:
+		template<class ... args_t>
+		component_t* add(handle_t handle, args_t&& ... args) {
+			if (auto [it, inserted] = components.emplace(handle, std::forward<args_t>(args)); inserted) {
+				return &it->second;
+			} return nullptr;
+		}
+
+		component_t* add(handle_t handle, const component_t& component) {
+			if (auto [it, inserted] = components.insert({handle, component}); inserted) {
+				return &it->second;
+			} return nullptr;
+		}
+
+		component_t* add(handle_t handle, component_t&& component) {
+			if (auto [it, inserted] = components.insert({handle, std::move(component)}); inserted) {
+				return &it->second;
+			} return nullptr;
+		}
+
+		void del(handle_t handle) {
+			components.erase(handle);
+		}
+
+		component_t* get(handle_t handle) {
+			if (auto it = components.find(handle); it != components.end()) {
+				return &it->second;
+			} return nullptr;
+		}
+
+		std::size_t count() const {
+			return components.size();
+		}
+
+		auto begin() {
+			return components.begin();
+		}
+
+		auto end() {
+			return components.end();
+		}
+
+	private:
+		std::unordered_map<handle_t, component_t> components;
 	};
 
-	using object_accessor_t = std::function<object_t*(handle_t)>;
+	class component_registry_t {
+		class component_entry_t {
+			using entry_free_t = void(*)(void*);
+			using entry_del_t = void(*)(void*, handle_t);
 
-	// TODO
+		public:
+			template<class entry_t>
+			component_entry_t(entry_t* entry) {
+				instance = entry;
+				entry_free = [] (void* inst) {
+					delete (entry_t*)inst;
+				};
+				entry_del = [] (void* inst, handle_t handle) {
+					((entry_t*)inst)->del(handle);
+				};
+			}
+
+			~component_entry_t() {
+				entry_free(instance);
+			}
+
+			component_entry_t(component_entry_t&& another) noexcept {
+				*this = std::move(another);
+			}
+
+			component_entry_t& operator = (component_entry_t&& another) noexcept {
+				std::swap(instance, another.instance);
+				std::swap(entry_free, another.entry_free);
+				std::swap(entry_del, another.entry_del);
+				return *this;
+			}
+
+		public:
+			void* instance{};
+			entry_free_t entry_free{};
+			entry_del_t entry_del{};
+		};
+
+	public:
+		template<class iter_t>
+		struct iter_helper_t {
+			iter_t begin() {
+				return iter_begin;
+			}
+
+			iter_t end() {
+				return iter_end;
+			}
+
+			iter_t iter_begin, iter_end;
+		};
+
+		template<class component_t>
+		auto& acquire_entry() {
+			using entry_t = component_entry_t<component_t>;
+			if (auto it = entries.find(type_id<component_t>); it != entries.end()) {
+				return (entry_t&)it->second;
+			}
+			auto [it, inserted] = entries.insert({type_id<component_t>, component_entry_t(new entry_t{})});
+			assert(inserted);
+			return (entry_t&)it->second;
+		}
+
+		template<class component_t, class ... args_t>
+		component_t* add(handle_t handle, args_t&& ... args) {
+			return acquire_entry<component_t>().add(handle, std::forward<args_t>(args)...);
+		}
+
+		template<class component_t>
+		component_t* add(handle_t handle, const component_t& component) {
+			return acquire_entry<component_t>().add(handle, component);
+		}
+
+		template<class component_t>
+		component_t* add(handle_t handle, component_t&& component) {
+			return acquire_entry<component_t>.add(handle, std::move(component));
+		}
+
+		template<class component_t>
+		void del(handle_t handle) {
+			acquire_entry<component_t>().del(handle);
+		}
+
+		template<class component_t>
+		component_t* get(handle_t handle) {
+			return acquire_entry<component_t>().get(handle);
+		}
+
+		template<class component_t>
+		std::size_t count() const {
+			return acquire_entry<component_t>().count();
+		}
+
+		template<class component_t>
+		auto begin_iter() {
+			return acquire_entry<component_t>().begin();
+		}
+
+		template<class component_t>
+		auto end_iter() {
+			return acquire_entry<component_t>().end();
+		}
+
+		template<class component_t>
+		auto iterate() {
+			return iter_helper_t{begin_iter<component_t>(), end_iter<component_t>()};
+		}
+
+	private:
+		std::unordered_map<std::size_t, component_entry_ptr_t> entries;
+	};
+
+	class system_registry_t {
+		class system_entry_t {
+			using system_free_t = void(*)(void*);
+
+		public:
+			template<system_t>
+			system_entry_t(system_t* system) {
+				instance = system;
+				system_free = [] (void* inst) {
+					delete (system_t*)inst;
+				};
+			}
+
+			system_entry_t(system_entry_t&& another) noexcept {
+				*this = std::move(another);
+			}
+
+			system_entry_t& operator= (system_entry_t&& another) noexcept {
+				std::swap(instance, another.instance);
+				std::swap(system_free, another.system_free);
+				return *this;
+			}
+
+			~system_entry_t() {
+				system_free(instance);
+			}
+
+		private:
+			void* instance{};
+			system_free_t system_free{};
+		};
+
+	public:
+		template<class system_t>
+		bool add(const std::string& name, system_t* sys) {
+			auto [it, inserted] = systems.insert({name, system_entry_t(sys)});
+			return inserted;
+		}
+
+		void del(const std::string& name) {
+			systems.erase(name);
+		}
+
+		template<class system_t>
+		system_t* get(const std::string& name) {
+			if (auto it = systems.find(name); it != systems.end()) {
+				return (system_t*)it->second.get();
+			} return nullptr;
+		}
+
+	private:
+		std::unordered_map<std::string, system_entry_t> systems;
+	};
+
+	class engine_ctx_t {
+	public:
+		[[nodiscard]] handle_t acquire() {
+			return handles.acquire();
+		}
+
+		void release(handle_t handle) {
+			return handles.release(handle);
+		}
+
+		template<class component_t, class ... args_t>
+		component_t* add_component(handle_t handle, args_t&& ... args) {
+			return component_registry.add<component_t>(handle, std::forward<args_t>(args));
+		}
+
+		template<class component_t>
+		component_t* add_component(handle_t handle, const component_t& component) {
+			return component_registry.add<component_t>(handle, component);
+		}
+
+		template<class component_t>
+		component_t* add_component(handle_t handle, component_t&& component) {
+			return component_registry.add<component_t>(handle, component);
+		}
+
+		template<class component_t>
+		void del_component(handle_t handle) {
+			component_registry.del<component_t>(handle);
+		}
+
+		template<class component_t>
+		component_t* get_component(handle_t handle) {
+			return component_registry.get<component_t>(handle);
+		}
+
+		template<class component_t>
+		auto iterate_components() {
+			return component_registry.iterate<component_t>();
+		}
+
+		template<class system_t>
+		void add_system(const std::string& name, system_t* sys) {
+			system_registry.add(name, sys);
+		}
+
+		template<class system_t>
+		void del_system(const std::string& name) {
+			system_registry.del<system_t>(name);
+		}
+
+		template<class system_t>
+		system_t* get_system(const std::string& name) {
+			return system_registry.get<system_t>();
+		}
+
+	private:
+		handle_pool_t handles;
+		component_registry_t component_registry;
+		system_registry_t system_registry;
+	};
+
+	struct entity_t {
+		template<class component_t, class ... args_t>
+		component_t* add_component(args_t&& ... args) {
+			return ctx->add<component_t>(handle, std::forward<args_t>(args));
+		}
+
+		template<class component_t>
+		component_t* add_component(const component_t& component) {
+			return ctx->add<component_t>(component);
+		}
+
+		template<class component_t>
+		component_t* add_component(component_t&& component) {
+			return ctx->add<component_t>(handle, component);
+		}
+
+		template<class component_t>
+		void del_component() {
+			ctx->del<component_t>(handle);
+		}
+
+		template<class component_t>
+		component_t* get_component() {
+			return ctx->get<component_t>(handle);
+		}
+
+		void release() {
+			ctx->release(handle);
+		}
+
+		engine_ctx_t* ctx{};
+		handle_t handle{null_handle};
+	};
+
+
 	struct basic_renderer_t {
 		object_accessor_t object_accessor;
 		handle_t viewer{null_handle};
@@ -1138,133 +1403,6 @@ void main() {
 		glm::vec3 vel{};
 		glm::vec3 force{};
 		float mass{};
-	};
-
-	struct velocity_verlet_integrator_t {
-		template<class accessor_t>
-		void set_object_accessor(accessor_t&& accessor) {
-			object_accessor = std::forward<accessor_t>(accessor);
-		}
-
-		object_accessor_t object_accessor;
-
-
-		void add_attractor(handle_t handle) {
-			attractor_handles.insert(handle);
-		}
-
-		void del_attractor(handle_t handle) {
-			attractor_handles.erase(handle);
-		}
-
-		std::unordered_set<handle_t> attractor_handles;
-
-
-		void add_force(handle_t handle) {
-			force_handles.insert(handle);
-		}
-
-		void del_force(handle_t handle) {
-			force_handles.erase(handle);
-		}
-
-		std::unordered_set<handle_t> force_handles;
-
-
-		glm::vec3 compute_force(const body_state_t& state) {
-			glm::vec3 acc{};
-			for (auto handle : attractor_handles) {
-				auto& attractor = object_accessor(handle)->attractor;
-				glm::vec3 dr = attractor.pos - state.pos;
-				float dr_mag2 = glm::dot(dr, dr);
-				float dr_mag = std::sqrt(dr_mag2);
-				if (attractor.min_dist <= dr_mag && dr_mag <= attractor.max_dist) {
-					acc += attractor.gm / dr_mag2 * dr / dr_mag;
-				} if (attractor.drag_min_dist <= dr_mag && dr_mag <= attractor.drag_max_dist) {
-					float c0 = attractor.drag_min_coef;
-					float c1 = attractor.drag_max_coef;
-					float d0 = attractor.drag_min_dist;
-					float d1 = attractor.drag_max_dist;
-					float coef = (1.0f - c1 + c0) * glm::smoothstep(d1, d0, dr_mag) + c0;
-					acc -= coef * state.vel;
-				}
-			} for (auto handle : force_handles) {
-				auto& force = object_accessor(handle)->force;
-				acc += force.dir * force.mag;
-			} return acc;
-		}
-
-		// simplification, compute acceleration beforehand
-		// this method will update state considering it acceleration as const
-		body_state_t update(const body_state_t& state, float dt) {
-			body_state_t new_state = state;
-			glm::vec3 acc = state.force / state.mass;
-			glm::vec3 vel_tmp = state.vel + 0.5f * acc * dt;
-			new_state.pos = state.pos + vel_tmp * dt;
-			new_state.vel = vel_tmp + 0.5f * acc * dt;
-			return new_state;
-		}
-	};
-
-	template<class type_t, class = void>
-	struct is_integrator_t : std::false_type {};
-
-	template<class type_t>
-	struct is_integrator_t<type_t, 
-		std::enable_if_t<
-			std::is_invocable_r_v<force_t, decltype(&type_t::compute_acc), const type_t*, const body_state_t&>
-			&& std::is_invocable_r_v<body_state_t, decltype(&type_t::update), const type_t*, const body_state_t&, float>
-		>> : std::true_type {};
-
-	template<class type_t>
-	inline constexpr bool is_integrator_v = is_integrator_t<type_t>::value;
-
-	struct integrator_proxy_t {
-		using compute_force_func_t = glm::vec3(*)(void*, const body_state_t&);
-		using update_func_t = body_state_t(*)(void*, const body_state_t&, float);
-
-		integrator_proxy_t() = default;
-
-		template<class integrator_t>
-		integrator_proxy_t(integrator_t& integrator) noexcept {
-			*this = integrator;
-		}
-
-		template<class integrator_t>
-		integrator_proxy_t& operator = (integrator_t& integrator) noexcept {
-			if ((void*)this == (void*)&integrator) {
-				return *this;
-			}
-
-			instance = &integrator;
-			compute_force_func = [] (void* inst, const body_state_t& state) {
-				return ((integrator_t*)inst)->compute_force(state);
-			};
-			update_func = [] (void* inst, const body_state_t& state, float dt) {
-				return ((integrator_t*)inst)->update(state, dt);
-			};
-			return *this;
-		}
-
-		integrator_proxy_t(const integrator_proxy_t&) = default;
-		integrator_proxy_t(integrator_proxy_t&&) noexcept = default;
-
-		~integrator_proxy_t() = default;
-
-		integrator_proxy_t& operator = (const integrator_proxy_t&) = default;
-		integrator_proxy_t& operator = (integrator_proxy_t&&) noexcept = default;
-
-		glm::vec3 compute_force(const body_state_t& state) const {
-			return compute_force_func(instance, state);
-		}
-
-		body_state_t update(const body_state_t& state, float dt) const {
-			return update_func(instance, state, dt);
-		}
-
-		void* instance{};
-		compute_force_func_t compute_force_func{};
-		update_func_t update_func{};
 	};
 
 	struct physics_system_info_t {
@@ -1533,13 +1671,47 @@ void main() {
 			return r0 + limit_vec(r1 - r0, max_len);
 		}
 
+		glm::vec3 compute_force(const body_state_t& state) {
+			glm::vec3 acc{};
+			for (auto handle : ctx->component_registry.iterate<attractor_t>()) {
+				auto& attractor = object_accessor(handle)->attractor;
+				glm::vec3 dr = attractor.pos - state.pos;
+				float dr_mag2 = glm::dot(dr, dr);
+				float dr_mag = std::sqrt(dr_mag2);
+				if (attractor.min_dist <= dr_mag && dr_mag <= attractor.max_dist) {
+					acc += attractor.gm / dr_mag2 * dr / dr_mag;
+				} if (attractor.drag_min_dist <= dr_mag && dr_mag <= attractor.drag_max_dist) {
+					float c0 = attractor.drag_min_coef;
+					float c1 = attractor.drag_max_coef;
+					float d0 = attractor.drag_min_dist;
+					float d1 = attractor.drag_max_dist;
+					float coef = (1.0f - c1 + c0) * glm::smoothstep(d1, d0, dr_mag) + c0;
+					acc -= coef * state.vel;
+				}
+			} for (auto handle : force_handles) {
+				auto& force = object_accessor(handle)->force;
+				acc += force.dir * force.mag;
+			} return acc;
+		}
+
+		// simplification, compute acceleration beforehand
+		// this method will update state considering it acceleration as const
+		body_state_t integrate_motion(const body_state_t& state, float dt) {
+			body_state_t new_state = state;
+			glm::vec3 acc = state.force / state.mass;
+			glm::vec3 vel_tmp = state.vel + 0.5f * acc * dt;
+			new_state.pos = state.pos + vel_tmp * dt;
+			new_state.vel = vel_tmp + 0.5f * acc * dt;
+			return new_state;
+		}
+
 		void get_integrator_updates(float dt) {
 			integrator_updates.clear();
 			for (int i = 0; i < objects.size(); i++) {
 				auto& physics = cached_objects[i]->physics;
 				auto state = body_state_t{physics.pos, physics.vel, physics.force, physics.mass};
-				state.force += integrator.compute_force(state);
-				auto new_state = integrator.update(state, dt);
+				state.force += compute_force(state);
+				auto new_state = integrate_motion(state, dt);
 				new_state.pos = limit_movement(state.pos, new_state.pos, movement_limit);
 				new_state.vel = limit_vec(new_state.vel, velocity_limit);
 				integrator_updates.push_back(new_state);
@@ -1597,6 +1769,8 @@ void main() {
 		}
 
 	private:
+		engine_ctx_t* ctx{};
+
 		float eps{};
 		float overlap_coef{};
 		float overlap_vel_coef{};
@@ -1863,7 +2037,7 @@ void main() {
 	};
 
 	std::vector<object_t> create_balls() {
-		float s_rad = 0.7f;
+		float s_rad = 0.1f;
 		float p_rad = s_rad + 0.1f;
 		object_t ball{
 			.transform = {
@@ -2059,6 +2233,8 @@ int main() {
 		for (auto& handle : balls) {
 			physics.add(handle);
 		}
+
+		std::cout << type_id<object_t> << " " << type_id<attractor_t> << std::endl;
 
 		while (!window.should_close()) {
 			glfw::poll_events();
