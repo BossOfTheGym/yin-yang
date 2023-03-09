@@ -843,75 +843,7 @@ void main() {
 		} return std::make_tuple(std::move(program), out.str());
 	}
 
-	// general_setup: some common setups, so there is no need it for each draw command
-	// vao_setups: some sutps specific for each vao draw command
-	// vao_drawers: draw command, how to draw each vao
-	struct basic_render_seq_t {
-		using shader_program_setup_t = std::function<void(shader_program_t& program)>;
-		using vertex_array_drawer_t = std::function<void(shader_program_t& program, vertex_array_t& vao)>;
 
-		using empty_setup_t = decltype([] (shader_program_t&) {});
-		using empty_drawer_t = decltype([] (shader_program_t&, vertex_array_t&) {});
-
-		basic_render_seq_t(std::shared_ptr<shader_program_t> _program) : program{std::move(_program)} {
-			assert(program && program->valid());
-		}
-
-		template<class setup_t>
-		void set_general_setup(setup_t&& setup) {
-			general_setup = std::forward<setup_t>(setup);
-		}
-
-		template<class drawer_t>
-		void add_draw_command(std::shared_ptr<vertex_array_t> vao, drawer_t&& drawer) {
-			vaos.push_back(std::move(vao));
-			vao_drawers.push_back(std::forward<drawer_t>(drawer));
-		}
-
-		void draw() {
-			program->use();
-			if (general_setup) {
-				general_setup(*program);
-			}
-
-			GLuint prev_vao_id = 0;
-			for (int i = 0; i < vaos.size(); i++) {
-				if (vaos[i]->id != prev_vao_id) {
-					vaos[i]->bind();
-				} vao_drawers[i](*program, *vaos[i]);
-			}
-		}
-
-		std::shared_ptr<shader_program_t> program;
-		shader_program_setup_t general_setup;
-		std::vector<std::shared_ptr<vertex_array_t>> vaos;
-		std::vector<vertex_array_drawer_t> vao_drawers;
-	};
-
-	struct basic_pass_t {
-		using pass_setup_t = std::function<void(framebuffer_t&)>;
-		using pass_action_t = pass_setup_t;
-
-		basic_pass_t() : fbo{framebuffer_t::create()} {}
-
-		template<class setup_t>
-		void add_setup(setup_t&& setup) {
-			setups.push_back(std::forward<setup_t>(setup));
-		}
-
-		template<class action_t>
-		void execute_action(action_t&& action) {
-			fbo.bind();
-			for (auto& setup : setups) {
-				setup(fbo);
-				action(fbo);
-			}
-		}
-
-		framebuffer_t fbo;
-		std::vector<pass_setup_t> setups;
-	};
-	
 	namespace impl {
 		template<class __handle_t, auto __null_handle>
 		struct handle_pool_t {
@@ -950,8 +882,9 @@ void main() {
 			}
 
 			bool is_used(handle_t handle) const {
-				assert((size_t)handle < handles.size());
-				return handles[handle] == handle;
+				if (handle < handles.size()) {
+					return handles[handle] == handle;
+				} return false;
 			}
 
 			void clear() {
@@ -959,6 +892,10 @@ void main() {
 				for (int i = 1; i < handles.size(); i++) {
 					handles[i - 1] = i;
 				} handles.back() = null_handle;
+			}
+
+			std::size_t get_use_count() const {
+				return handles.size();
 			}
 
 		private:
@@ -1049,6 +986,74 @@ void main() {
 		std::size_t id{};
 	};
 
+	template<class resource_t>
+	using resource_ptr_t = std::shared_ptr<resource_t>;
+
+	class resource_cache_t {
+		struct resource_tag_t;
+
+		template<class resource_t>
+		static inline const std::size_t resource_id = type_id<resource_t, resource_tag_t>;
+
+		class resource_cache_if_t {
+			virtual ~resource_cache_if_t() {}
+		}
+
+		template<class resource_t>
+		class resource_cache_t : public resource_cache_if_t {
+		public:
+			void add(const std::string& name, resource_ptr_t<resource_t> resource) {
+				cache[name] = resource;
+			}
+
+			void remove(const std::string& name) {
+				cache.erase(name);
+			}
+
+			resource_ptr_t<resource_t> get(const std::string& name) {
+				if (auto it = cache.find(name); it != cache.end()) {
+					return it->seccond;
+				} return {};
+			}
+
+		private:
+			std::unordered_map<std::string, resource_ptr_t> cache;
+		};
+
+		using resource_storage_t = if_storage_t<resource_cache_if_t>;
+
+		template<class resource_t>
+		auto& acquire_cache() {
+			using cache_t = resource_cache_t<resource_t>;
+
+			if (auto it = caches.find(resource_id<resource_t>); it != caches.end()) {
+				return it->second.get<cache_t>();
+			}
+			auto [it, inserted] = caches.insert({resource_id<resource_t>, resource_storage_t::create<cache_t>()});
+			assert(inserted);
+			return it->second.get<cache_t>();
+		}
+
+	public:
+		template<class resource_t>
+		void add(const std::string& name, resource_ptr_t<resource_t> resource) {
+			acquire_cache<resource_t>().add(name, resource);
+		}
+
+		template<class resource_t>
+		void remove(const std::string& name) {
+			acquire_cache<resource_t>().remove(name);
+		}
+
+		template<class resource_t>
+		auto get(const std::string& name) {
+			acquire_cache<resource_t>().get(name);
+		}
+
+	private:
+		std::unordered_map<std::string, resource_cache_t> caches;
+	};
+
 	class component_registry_t {
 		struct component_tag_t;
 
@@ -1083,13 +1088,19 @@ void main() {
 				} return nullptr;
 			}
 
-			virtual void del(handle_t handle) override {
+			virtual void remove(handle_t handle) override {
 				components.erase(handle);
 			}
 
 			component_t* get(handle_t handle) {
 				if (auto it = components.find(handle); it != components.end()) {
 					return &it->second;
+				} return nullptr;
+			}
+
+			component_t* peek() {
+				if (!components.empty()) {
+					return &components.begin()->second;
 				} return nullptr;
 			}
 
@@ -1146,13 +1157,18 @@ void main() {
 		}
 
 		template<class component_t>
-		void del(handle_t handle) {
-			acquire_entry<component_t>().del(handle);
+		void remove(handle_t handle) {
+			acquire_entry<component_t>().remove(handle);
 		}
 
 		template<class component_t>
 		component_t* get(handle_t handle) {
 			return acquire_entry<component_t>().get(handle);
+		}
+
+		template<class component_t>
+		component_t* peek() {
+			return acquire_entry<component_t>().peek();
 		}
 
 		template<class component_t>
@@ -1191,8 +1207,11 @@ void main() {
 	};
 
 	// nothing else for now, no-copy and no-move by default
+	class engine_ctx_t;
+
 	class system_if_t {
 	public:
+		system_if_t(engine_ctx_t* _ctx) : ctx{_ctx} {}
 		system_if_t(const system_if_t&) = delete
 		system_if_t(system_if_t&&) noexcept = delete;
 
@@ -1200,6 +1219,13 @@ void main() {
 
 		system_if_t& operator = (const system_if_t&) = delete
 		system_if_t& operator = (system_if_t&&) noexcept = delete;
+
+		inline engine_ctx_t* get_ctx() const {
+			return ctx;
+		}
+
+	private:
+		engine_ctx_t* ctx{};
 	};
 
 	class system_registry_t {
@@ -1207,14 +1233,15 @@ void main() {
 		using system_storage_t = if_storage_t<system_if_t>;
 
 	public:
+		// yes, now it will destroy completely your pointer if system exists
 		template<class system_t>
-		void add(const std::string& name, system_t* sys) {
+		bool add(const std::string& name, system_t* sys) {
 			auto [it, inserted] = systems.insert({name, system_storage_t::create(sys)});
-			assert(inserted);
+			return inserted;
 		}
 
-		void del(const std::string& name) {
-			systems.erase(name);
+		bool remove(const std::string& name) {
+			return systems.erase(name);
 		}
 
 		template<class system_t>
@@ -1230,38 +1257,96 @@ void main() {
 
 	class engine_ctx_t {
 	public:
+		template<class resouce_t>
+		void add_resource(const std:::string& name, resource_ptr_t<resource_t> resource) {
+			resources.add<resource_t>(name, std::move(resource));
+		}
+
+		template<class resource_t>
+		void remove_resource(const std::string& name) {
+			resources.remove<resource_t>(name);
+		}
+
+		template<class resource_t>
+		void get_resource(const std::string& name) {
+			return resources.get<resource_t>(name);
+		}
+
 		[[nodiscard]] handle_t acquire() {
-			return handles.acquire();
+			handle_t handle = handles.acquire();
+			if (refcount.size() < handles.get_use_count()) {
+				refcount.resize(handles.get_use_count());
+			}
+			refcount[handle] = 1;
+			return handle;
+		}
+
+		void incref(handle_t handle) {
+			if (refcount.size() <= handle || refcount[handle] == 0) {
+				std::cerr << "trying to incref invalid handle " << handle << std::endl;
+				return;
+			} refcount[handle]++;
 		}
 
 		void release(handle_t handle) {
-			component_registry.release(handle);
-			return handles.release(handle);
+			if (refcount.size() <= handle || refcount[handle] == 0) {
+				std::cerr << "trying to release invalid handle " << handle << std::endl;
+				return;
+			}
+			refcount[handle]--;
+			if (refcount[handle] == 0) {
+				component_registry.release(handle);
+				handles.release(handle);
+			}
+		}
+
+		bool is_alive(handle_t handle) {
+			return handles.is_used();
 		}
 
 		template<class component_t, class ... args_t>
 		component_t* add_component(handle_t handle, args_t&& ... args) {
-			return component_registry.add<component_t>(handle, std::forward<args_t>(args));
+			if (!is_alive(handle)) {
+				std::cerr << "trying to add component to invalid handle " << handle << std::endl;
+				return nullptr;
+			} return component_registry.add<component_t>(handle, std::forward<args_t>(args));
 		}
 
 		template<class component_t>
 		component_t* add_component(handle_t handle, const component_t& component) {
-			return component_registry.add<component_t>(handle, component);
+			if (!is_alive(handle)) {
+				std::cerr << "trying to add component to invalid handle " << handle << std::endl;
+				return nullptr;
+			} return component_registry.add<component_t>(handle, component);
 		}
 
 		template<class component_t>
 		component_t* add_component(handle_t handle, component_t&& component) {
-			return component_registry.add<component_t>(handle, component);
+			if (!is_alive(handle)) {
+				std::cerr << "trying to add component to invalid handle " << handle << std::endl;
+				return nullptr;
+			} return component_registry.add<component_t>(handle, component);
 		}
 
 		template<class component_t>
-		void del_component(handle_t handle) {
-			component_registry.del<component_t>(handle);
+		void remove_component(handle_t handle) {
+			if (!is_alive(handle)) {
+				std::cerr << "trying to remove component using invalid handle " << handle << std::endl;
+				return;
+			} component_registry.remove<component_t>(handle);
 		}
 
 		template<class component_t>
 		component_t* get_component(handle_t handle) {
-			return component_registry.get<component_t>(handle);
+			if (!is_alive(handle)) {
+				std::cerr << "trying to get component using invalid handle " << handle << std::endl;
+				return nullptr;
+			} return component_registry.get<component_t>(handle);
+		}
+
+		template<class component_t>
+		component_t* peek_component() {
+			return component_registry.peek<component_t>();
 		}
 
 		template<class component_t>
@@ -1282,27 +1367,43 @@ void main() {
 		}
 
 		template<class system_t>
-		void add_system(const std::string& name, system_t* sys) {
-			system_registry.add(name, sys);
+		bool add_system(const std::string& name, system_t* sys) {
+			if (!system_registry.add(name, sys)) {
+				std::cerr << "failed to add system " << std::quoted(name) << std::endl;
+				return false;
+			} return true;
 		}
 
 		template<class system_t>
-		void del_system(const std::string& name) {
-			system_registry.del<system_t>(name);
+		bool remove_system(const std::string& name) {
+			if (!system_registry.remove<system_t>(name)) {
+				std::cerr << "failed to remove system " << std::quoted(name) << std::endl;
+				return false;
+			} return true;
 		}
 
 		template<class system_t>
 		system_t* get_system(const std::string& name) {
-			return system_registry.get<system_t>();
+			if (system_t* sys = system_registry.get<system_t>()) {
+				return sys;
+			}
+			std::cerr << "failed to get system " << std::quoted(name) << std::endl;
+			return nullptr;
 		}
 
 	private:
 		handle_pool_t handles;
+		std::vector<int> refcount;
+		resource_cache_t resources;
 		component_registry_t component_registry;
 		system_registry_t system_registry;
 	};
 
-	struct entity_t {
+	// it is just an utility
+	class entity_t {
+	public:
+		entity_t(engine_ctx_t* _ctx, handle_t _handle) : ctx{_ctx}, handle{_handle} {}
+
 		template<class component_t, class ... args_t>
 		component_t* add_component(args_t&& ... args) {
 			return ctx->add<component_t>(handle, std::forward<args_t>(args));
@@ -1319,7 +1420,7 @@ void main() {
 		}
 
 		template<class component_t>
-		void del_component() {
+		void remove_component() {
 			ctx->del<component_t>(handle);
 		}
 
@@ -1328,12 +1429,22 @@ void main() {
 			return ctx->get<component_t>(handle);
 		}
 
+		void incref() {
+			ctx->incref(handle);
+		}
+
 		void release() {
 			ctx->release(handle);
 		}
 
+	private:
 		engine_ctx_t* ctx{};
 		handle_t handle{null_handle};
+	};
+
+	// inherit from it when you need ctx 
+	struct ctx_component_t {
+		engine_ctx_t* ctx{};
 	};
 
 
@@ -1388,8 +1499,8 @@ void main() {
 	public:
 		static constexpr float no_collision = 2.0f;
 
-		physics_system_t(engine_ctx_t* _ctx, const physics_system_info_t& info)
-			: ctx{_ctx}
+		physics_system_t(engine_ctx_t* ctx, const physics_system_info_t& info)
+			: system_if_t(ctx)
 			, eps{info.eps}
 			, overlap_coef{info.overlap_coef}
 			, overlap_vel_coef{info.overlap_vel_coef}
@@ -1403,13 +1514,13 @@ void main() {
 			, impact_cor{info.impact_cor}
 			, impact_v_loss{info.impact_v_loss}
 			, dt_split{info.dt_split}
-			{}
+		{}
 
 	private:
 		void cache_components() {
 			cached_components.clear();
 			index_to_handle.clear();
-			for (auto& [handle, component] : ctx->iterate_components<physics_t>()) {
+			for (auto& [handle, component] : get_ctx()->iterate_components<physics_t>()) {
 				index_to_handle.push_back(handle);
 				cached_components.push_back(&component);
 			} total_objects = index_to_handle.size();
@@ -1554,7 +1665,7 @@ void main() {
 
 		glm::vec3 compute_force(const body_state_t& state) {
 			glm::vec3 acc{};
-			for (auto& [handle, attractor] : ctx->iterate_components<attractor_t>()) {
+			for (auto& [handle, attractor] : get_ctx()->iterate_components<attractor_t>()) {
 				glm::vec3 dr = attractor.pos - state.pos;
 				float dr_mag2 = glm::dot(dr, dr);
 				float dr_mag = std::sqrt(dr_mag2);
@@ -1568,7 +1679,7 @@ void main() {
 					float coef = (1.0f - c1 + c0) * glm::smoothstep(d1, d0, dr_mag) + c0;
 					acc -= coef * state.vel;
 				}
-			} for (auto& [handle, force] : ctx->iterate_components<force_t>()) {
+			} for (auto& [handle, force] : get_ctx()->iterate_components<force_t>()) {
 				acc += force.dir * force.mag;
 			} return acc;
 		}
@@ -1647,8 +1758,6 @@ void main() {
 		}
 
 	private:
-		engine_ctx_if_t* ctx{};
-
 		float eps{};
 		float overlap_coef{};
 		float overlap_vel_coef{};
@@ -1678,16 +1787,13 @@ void main() {
 
 	class timer_system_t : public system_if_t {
 	public:
-		timer_system_t(engine_ctx_t* _ctx) : ctx{_ctx} {}
+		timer_system_t(engine_ctx_t* ctx) : system_if_t(ctx) {}
 
 		void update(tick_t dt) {
-			for (auto& [handle, timer] : ctx->iterate_components<timer_component_t>()) {
+			for (auto& [handle, timer] : get_ctx()->iterate_components<timer_component_t>()) {
 				timer.update(dt);
 			}
 		}
-
-	private:
-		engine_ctx_t* ctx{};
 	};
 
 
@@ -1708,26 +1814,17 @@ void main() {
 	// sync position, basic stuff
 	class sync_transform_physics_system_t : public system_if_t {
 	public:
-		sync_transform__physics_system_t(engine_ctx_t* _ctx) : ctx{ctx} {}
+		sync_transform_physics_system_t(engine_ctx_t* ctx) : system_if_t(ctx) {}
 
 		void update() {
-			for (auto& [handle, physics] : ctx->iterate_components<physics_t>()) {
-				if (transform_t* transform = ctx->get_component<transform_t>(handle)) {
+			for (auto& [handle, physics] : get_ctx()->iterate_components<physics_t>()) {
+				if (transform_t* transform = get_ctx()->get_component<transform_t>(handle)) {
 					transform->translation = physics.pos;
 				} 
 			}
 		}
-
-	private:
-		engine_ctx_t* ctx{};
 	};
 
-
-	struct material_t {
-		glm::vec3 color{};
-		float specular_strength{};
-		float shininess{};
-	};
 
 	struct camera_t {
 		glm::mat4 get_view() const {
@@ -1751,24 +1848,119 @@ void main() {
 		glm::vec3 ambient{};
 		glm::vec3 color{};
 		glm::vec3 pos{};
+	};	
+
+	struct basic_material_t {
+		glm::vec3 color{};
+		float specular_strength{};
+		float shininess{};
+		resource_ptr_t<vertex_array_t> vao;
 	};
 
-	struct vao_t {
-		std::shared_ptr<vertex_array_t> vao;
+	struct basic_pass_t : public ctx_component_t {
+		~basic_pass_component_t() {
+			ctx->release(camera);
+			ctx->release(light);
+		}
+
+		glm::vec4 clear_color{};
+		float clear_depth{};
+		int viewport_x0{};
+		int viewport_y0{};
+		int viewport_width{};
+		int viewport_height{};
+		handle_t camera{};
+		handle_t light{};
+		resource_ptr_t<framebuffer_t> framebuffer;
 	};
-
-	// TODO : guarded_entity_t or guarded_handle_t
-	// TODO : create component that has all required state to render
-	// TODO : implement system
-
-	// TODO : implement resource cache (well-p, storage)
 
 	class basic_renderer_system_t : public system_if_t {
 	public:
+		basic_renderer_system_t(engine_ctx_t* ctx, resource_ptr_t<shader_program_t> _program)
+			: system_if_t(ctx),  program{std::move(_program)} {}
 
 	private:
+		void render_pass(basic_pass_t* pass, camera_t* camera, omnidir_light_t* light) {
+			// TODO : save/restore render state
+			auto& col = pass->clear_color;
+			pass->framebuffer->bind();
+			glClearColor(col.r, col.g, col.b, col.a);
+			glClearDepth(pass->clear_depth);
+			glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+			glViewport(pass->viewport_x, pass->viewport_y, pass->viewport_width, pass->viewport_height);
+			glEnable(GL_DEPTH_TEST);
+			glEnable(GL_CULL_FACE);
+
+			program->set_mat4("u_v", camera->get_view());
+			program->set_mat4("u_p", camera->get_proj());
+			program->set_vec3("u_eye_pos", camera->eye);
+			program->set_vec3("u_ambient_color", light->ambient);
+			program->set_vec3("u_light_color", light->color);
+			program->set_vec3("u_light_pos", light->pos);
+
+			GLuint prev_vao{};
+			for (auto& [handle, material] : get_ctx()->iterate_components<basic_material_t>()) {
+				auto* transform = get_ctx()->get_component<transform_t>(handle);
+				if (!transform) {
+					std::cerr << "missing transform component. handle: " << handle << std::endl;
+					continue;
+				}
+
+				if (material.vao->id != prev_vao) {
+					glBindVertexArray(material.vao->id);
+				}
+				program.set_mat4("u_m", transform->to_mat4());
+				program.set_vec3("u_object_color", material.color);
+				program.set_float("u_shininess", material.shininess);
+				program.set_float("u_specular_strength", material.specular_strength);
+				glDrawArrays(material.vao->mode, 0, material.vao->count);
+			}
+		}
+
+	public:
+		void update() {
+			for (auto& [handle, pass] : get_ctx()->iterate_components<basic_pass_t>()) {
+				auto* camera = get_ctx()->get_component<camera_t>(pass.camera);
+				if (!camera) {
+					std::cerr << "missing camera component. handle: " << handle << " camera: " << pass.camera << std::endl;
+					continue;
+				}
+
+				auto* light = get_ctx()->get_component<omnidir_light_t>(pass.light);
+				if (!light) {
+					std::cerr << "missing light component. handle: " << handle << " light: " << pass.light << std::endl;
+					continue;
+				}
+				
+				render_pass(&pass, camera, light);
+			}
+		}
+
+	private:
+		resource_ptr_t<shader_program_t> program;
 	};
 
+
+	struct gui_pass_t {
+		// TODO
+		resource_ptr_t<framebuffer_t> framebuffer;
+	};
+
+	class gui_system_t : public system_if_t {
+	public:
+		gui_system_t(engine_ctx_t* ctx) : system_if_t(ctx) {
+			// TODO
+		}
+
+	private:
+	}
+
+	// TODO : gui_system
+	// TODO : level_system_t
+	// TODO : ball_spawner_system_t
+	// TODO : fancy_attractor_system_t
+	// TODO : mainloop
+	
 	// TODO : advanced physics
 	// TODO : grid update method
 	// TODO : multithreaded update
@@ -1839,9 +2031,7 @@ void main() {
 			, l_gen(shuffle(seed + 2), 0.0f, 1.0f) {}
 
 		glm::vec3 gen() {
-			float h = h_gen.gen();
-			float s = s_gen.gen();
-			float l = l_gen.gen();
+			float h = h_gen.gen(), s = s_gen.gen(), l = l_gen.gen();
 			return glm::vec3(h, s, l);
 		}
 
@@ -1986,99 +2176,10 @@ int main() {
 			return -1;
 		}
 
-		for (auto& [name, props] : program_ptr->uniforms) {
-			std::cout << props << std::endl;
-		}
-
 		auto sphere_mesh_ptr = ([&] () { return std::make_shared<mesh_t>(gen_sphere_mesh(1)); })();
-
-		auto sphere_vao_ptr = ([&] () {
-			return std::make_shared<vertex_array_t>(gen_vertex_array_from_mesh(*sphere_mesh_ptr));
-		})();
-
-		auto fbo_color = ([&] () {
-			return std::make_shared<texture_t>(gen_empty_texture(fbo_width, fbo_height, Rgba32f));
-		})();
-
-		auto fbo_depth = ([&] () {
-			return std::make_shared<texture_t>(gen_depth_texture(fbo_width, fbo_height, Depth32f));
-		})();
-
-		basic_pass_t pass;
-		pass.add_setup([&] (framebuffer_t& fbo) {
-			fbo.attach({Color0, fbo_color->id, 0});
-			fbo.attach({Depth, fbo_depth->id, 0});
-			glClearColor(0.0, 0.0, 0.0, 1.0);
-			glClearDepth(1.0);
-			glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-			glEnable(GL_DEPTH_TEST);
-			glEnable(GL_CULL_FACE);
-			glViewport(0, 0, fbo_width, fbo_height);
-		});
-
-		handle_storage_t<object_t> objects;
-
-		handle_t viewer = objects.add({
-			.camera = {
-				.fov = 75.0f, .aspect_ratio = (float)fbo_width / fbo_height, .near = 1.0f, .far = 300.0f,
-				.eye = glm::vec3(20.0f, 0.0f, 0.0f),
-				.center = glm::vec3(0.0f, 0.0f, 0.0f),
-				.up = glm::vec3(0.0f, 1.0f, 0.0f)
-			}
-		});
-
-		handle_t light_source = objects.add({
-			.omnilight = {
-				.ambient = glm::vec3(0.1f, 0.1f, 0.1f),
-				.color = glm::vec3(1.0f, 1.0f, 1.0f),
-				.pos = glm::vec3(10.0f, 10.0f, 10.0f),
-			}
-		});
-
-		handle_t attractor0 = objects.add({
-			.transform = {
-				.base = glm::mat4(1.0f),
-				.scale = glm::vec3(0.5f),
-				.rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f),
-				.translation = glm::vec3(0.0f, 0.0f, 0.0f)
-			},
-			.material = { .color = glm::vec3(1.0f, 0.0f, 0.0f), .specular_strength = 0.5, .shininess = 32.0f },
-			.attractor = {
-				.pos = glm::vec3(0.0f, 0.0f, 0.0f),
-				.gm = 1000.0f,
-				.min_dist = 3.0,
-				.max_dist = 300.0f,
-				.drag_min_coef = 0.5f,
-				.drag_max_coef = 0.9f,
-				.drag_min_dist = 2.0f,
-				.drag_max_dist = 7.0f
-			}
-		});
-
-		basic_render_seq_t render_seq(program_ptr);
-		render_seq.set_general_setup([&] (shader_program_t& program) {
-			auto viewer_ptr = objects.get(viewer);
-			auto light_source_ptr = objects.get(light_source);
-			program.set_mat4("u_v", viewer_ptr->camera.get_view());
-			program.set_mat4("u_p", viewer_ptr->camera.get_proj());
-			program.set_vec3("u_ambient_color", light_source_ptr->omnilight.ambient);
-			program.set_vec3("u_light_color", light_source_ptr->omnilight.color);
-			program.set_vec3("u_light_pos", light_source_ptr->omnilight.pos);
-			program.set_vec3("u_eye_pos", viewer_ptr->camera.eye);
-		});
-
-		render_seq.add_draw_command(sphere_vao_ptr,
-			[&] (shader_program_t& program, vertex_array_t& vao) {
-				for (auto handle : basic_renderables) {
-					auto& object = *objects.get(handle);
-					program.set_mat4("u_m", object.transform.to_mat4());
-					program.set_vec3("u_object_color", object.material.color);
-					program.set_float("u_shininess", object.material.shininess);
-					program.set_float("u_specular_strength", object.material.specular_strength);
-					glDrawArrays(vao.mode, 0, vao.count);
-				}
-			}
-		);
+		auto sphere_vao_ptr = ([&] () { return std::make_shared<vertex_array_t>(gen_vertex_array_from_mesh(*sphere_mesh_ptr)); })();
+		auto fbo_color = ([&] () { return std::make_shared<texture_t>(gen_empty_texture(fbo_width, fbo_height, Rgba32f)); })();
+		auto fbo_depth = ([&] () { return std::make_shared<texture_t>(gen_depth_texture(fbo_width, fbo_height, Depth32f)); })();
 
 		physics_system_info_t physics_system_info{
 			.eps = 1e-6f,
@@ -2112,8 +2213,6 @@ int main() {
 			ImGui_ImplGlfw_NewFrame();
 			ImGui::NewFrame();
 
-			//demo.render();
-			//sim.render();
 			framebuffer_widget.render(reinterpret_cast<ImTextureID>(fbo_color->id), fbo_color->width, fbo_color->height);
 
 			ImGui::Render();
