@@ -3,18 +3,24 @@
 #include <utility>
 #include <functional>
 
+using timeout_action_t = std::function<void()>;
+using timeout_handler_t = std::function<timeout_action_t()>;
+
+// TODO : rework
 template<class __value_t>
 class dt_timer_t {
 public:
 	using value_t = __value_t;
 
-	using timeout_ev_handler_t = std::function<void()>;
-
 	template<class handler_t>
-	dt_timer_t(value_t _tick, value_t _delay, handler_t&& handler)
-		: tick{_tick}, delay{_delay}, timeout{std::forward<timeout_t>(handler)} {}
+	dt_timer_t(handler_t&& handler, value_t _delay, value_t _tick, bool _single_shot)
+		: timeout{std::forward<timeout_t>(handler)}, delay{_delay}, tick{_tick}, single_shot{_single_shot} {}
 
-	void update(value_t dt) {
+	timeout_action_t update(value_t dt) {
+		if (fired) {
+			return {};
+		}
+
 		if (delay > value_t(0)) {
 			value_t cut = std::min(delay, dt);
 			delay -= cut;
@@ -26,8 +32,11 @@ public:
 			t -= tick;
 			if (timeout) {
 				timeout();
+			} if (single_shot) {
+				fired = true;
+				break;
 			}
-		}
+		} return {};
 	}
 
 	void set_tick(value_t value) {
@@ -46,6 +55,7 @@ public:
 		t = value_t(0);
 		delay = value_t(0);
 		tick = tick_value;
+		fired = false;
 	}
 
 	template<class handler_t>
@@ -54,13 +64,14 @@ public:
 	}
 
 	void reset_timeout_handler() {
-		timeout = timeout_ev_handler_t();
+		timeout = timeout_handler_t();
 	}
 
 private:
-	timeout_ev_handler_t timeout;
-
+	timeout_handler_t timeout;
 	value_t delay{};
 	value_t t{};
 	value_t tick{};
+	bool single_shot{};
+	bool fired{};
 };
