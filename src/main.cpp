@@ -110,7 +110,7 @@ namespace {
 	struct framebuffer_widget_t {
 		static constexpr ImGuiWindowFlags flags_init = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_AlwaysAutoResize;
 
-		void render(ImTextureID id, int width, int height) {
+		void render(GLuint id, int width, int height) {
 			if (!opened) {
 				return;
 			}
@@ -123,7 +123,7 @@ namespace {
 				pos.x += 0;
 				pos.y += height;
 				ImGui::SetCursorPos(pos);
-				ImGui::Image(id, ImVec2(width, -height));
+				ImGui::Image(reinterpret_cast<ImTextureID>(id), ImVec2(width, -height));
 			} ImGui::End();
 		}
 
@@ -956,7 +956,12 @@ void main() {
 
 		template<class object_t>
 		static if_storage_t create(object_t* object) {
-			return {std::unique_ptr<if_t>(object), object, object_id<object_t>};
+			return {std::shared_ptr<if_t>(object), object, object_id<object_t>};
+		}
+
+		template<class object_t>
+		static if_storage_t create(std::shared_ptr<object_t> object_ptr) {
+			return {std::move(object_ptr), object_ptr.get(), object_id<object_t>};
 		}
 
 		if_storage_t(if_storage_t&& another) noexcept {
@@ -981,7 +986,7 @@ void main() {
 		}
 
 	private:
-		std::shared_ptr<if_t> if_ptr{}; // shared_ptr to simplify things up
+		std::shared_ptr<if_t> if_ptr{};
 		void* true_ptr{}; // true pointer to entry to avoid dynamic_cast (can be directly cast to object using static_cast)
 		std::size_t id{};
 	};
@@ -1233,10 +1238,9 @@ void main() {
 		using system_storage_t = if_storage_t<system_if_t>;
 
 	public:
-		// yes, now it will destroy completely your pointer if system exists
 		template<class system_t>
-		bool add(const std::string& name, system_t* sys) {
-			auto [it, inserted] = systems.insert({name, system_storage_t::create(sys)});
+		bool add(const std::string& name, std::shared_ptr<system_t> sys) {
+			auto [it, inserted] = systems.insert({name, system_storage_t::create(std::move(sys))});
 			return inserted;
 		}
 
@@ -1367,8 +1371,8 @@ void main() {
 		}
 
 		template<class system_t>
-		bool add_system(const std::string& name, system_t* sys) {
-			if (!system_registry.add(name, sys)) {
+		bool add_system(const std::string& name, std::shared_ptr<system_t> sys) {
+			if (!system_registry.add(name, std::move(sys))) {
 				std::cerr << "failed to add system " << std::quoted(name) << std::endl;
 				return false;
 			} return true;
@@ -1857,23 +1861,25 @@ void main() {
 		resource_ptr_t<vertex_array_t> vao;
 	};
 
+	struct viewport_t {
+		int x{}, y{}, width{}, height{};
+	}
+
 	struct basic_pass_t : public ctx_component_t {
 		~basic_pass_component_t() {
 			ctx->release(camera);
 			ctx->release(light);
 		}
 
+		resource_ptr_t<framebuffer_t> framebuffer;
+		viewport_t viewport{};
 		glm::vec4 clear_color{};
 		float clear_depth{};
-		int viewport_x0{};
-		int viewport_y0{};
-		int viewport_width{};
-		int viewport_height{};
 		handle_t camera{};
 		handle_t light{};
-		resource_ptr_t<framebuffer_t> framebuffer;
 	};
 
+	// TODO : instanced rendering
 	class basic_renderer_system_t : public system_if_t {
 	public:
 		basic_renderer_system_t(engine_ctx_t* ctx, resource_ptr_t<shader_program_t> _program)
@@ -1881,16 +1887,48 @@ void main() {
 
 	private:
 		void render_pass(basic_pass_t* pass, camera_t* camera, omnidir_light_t* light) {
-			// TODO : save/restore render state
+			struct save_restore_render_state_t {
+				save_restore_render_state_t() {
+					glGetIntegerv(GL_VIEWPORT, viewport);
+					glGetFloatv(GL_COLOR_CLEAR_VALUE, clear_color);
+					glGetFloatv(GL_DEPTH_CLEAR_VALUE, &clear_depth);
+					glGetBooleanv(GL_DEPTH_TEST, &depth_test);
+					glGetBooleanv(GL_CULL_FACE, &cull_face);
+				}
+
+				~save_restore_render_state_t() {
+					glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
+					glClearColor(clear_color[0], clear_color[1], clear_color[2], clear_color[3]);
+					glClearDepth(clear_depth);
+					if (depth_test) {
+						glEnable(GL_DEPTH_TEST);
+					} else {
+						glDisable(GL_DEPTH_TEST);
+					} if (cull_face) {
+						glEnable(GL_CULL_FACE);
+					} else {
+						glDisable(GL_CULL_FACE);
+					}
+				}
+
+				GLfloat clear_color[4] = {};
+				GLfloat clear_depth{};
+				GLint viewport[4]{};
+				GLboolean depth_test{};
+				GLboolean cull_face{};
+			} state;
+
+			auto& viewport = pass->viewport;
+			glViewport(viewport.x, viewport.y, viewport.width, viewport.height);
 			auto& col = pass->clear_color;
 			pass->framebuffer->bind();
 			glClearColor(col.r, col.g, col.b, col.a);
 			glClearDepth(pass->clear_depth);
 			glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-			glViewport(pass->viewport_x, pass->viewport_y, pass->viewport_width, pass->viewport_height);
 			glEnable(GL_DEPTH_TEST);
 			glEnable(GL_CULL_FACE);
 
+			program->use();
 			program->set_mat4("u_v", camera->get_view());
 			program->set_mat4("u_p", camera->get_proj());
 			program->set_vec3("u_eye_pos", camera->eye);
@@ -1907,7 +1945,7 @@ void main() {
 				}
 
 				if (material.vao->id != prev_vao) {
-					glBindVertexArray(material.vao->id);
+					material.vao->bind();
 				}
 				program.set_mat4("u_m", transform->to_mat4());
 				program.set_vec3("u_object_color", material.color);
@@ -1931,7 +1969,7 @@ void main() {
 					std::cerr << "missing light component. handle: " << handle << " light: " << pass.light << std::endl;
 					continue;
 				}
-				
+
 				render_pass(&pass, camera, light);
 			}
 		}
@@ -1941,25 +1979,74 @@ void main() {
 	};
 
 
-	struct gui_pass_t {
-		// TODO
+	struct imgui_pass_t {
 		resource_ptr_t<framebuffer_t> framebuffer;
+		viewport_t viewport{};
+		glm::vec4 clear_color{};
+		float clear_depth{};
 	};
 
-	class gui_system_t : public system_if_t {
+	// for now simplified
+	class imgui_system_t : public system_if_t {
 	public:
-		gui_system_t(engine_ctx_t* ctx) : system_if_t(ctx) {
-			// TODO
+		imgui_system_t(engine_ctx_t* ctx, GLFWwindow* window, const std::string& version) : system_if_t(ctx) {
+			IMGUI_CHECKVERSION();
+			ImGui::CreateContext();
+			ImGui::StyleColorsDark();
+			ImGui_ImplGlfw_InitForOpenGL(window, true);
+			ImGui_ImplOpenGL3_Init(version.c_str());
+		}
+
+		~imgui_system_t() {
+			ImGui_ImplOpenGL3_Shutdown();
+			ImGui_ImplGlfw_Shutdown();
+			ImGui::DestroyContext();
+		}
+
+		void update() {
+			struct save_restore_render_state_t {
+				save_restore_render_state_t() {
+
+				}
+
+				~save_restore_render_state_t() {
+
+				}
+
+			} state;
+
+			ImGui_ImplOpenGL3_NewFrame();
+			ImGui_ImplGlfw_NewFrame();
+			ImGui::NewFrame();
+
+			framebuffer_widget.render(fbo_color->id, fbo_color->width, fbo_color->height);
+
+			ImGui::Render();
+
+			// actual rendering
+			for (auto& [handle, ])
+			glClearColor(0.2, 0.2, 0.2, 1.0);
+			glClearDepth(1.0f);
+			glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+			glViewport(0, 0, w, h);
+
+			ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 		}
 
 	private:
+		framebuffer_widget_t framebuffer_widget;
 	}
 
-	// TODO : gui_system
-	// TODO : level_system_t
+	// TODO
+	class level_system_t : public system_if_t {
+	public:
+
+	private:
+	};
+
+	// TODO : mainloop
 	// TODO : ball_spawner_system_t
 	// TODO : fancy_attractor_system_t
-	// TODO : mainloop
 	
 	// TODO : advanced physics
 	// TODO : grid update method
@@ -2150,20 +2237,11 @@ int main() {
 
 	window.make_ctx_current();
 
-	IMGUI_CHECKVERSION();
-	ImGui::CreateContext();
-	ImGui::StyleColorsDark();
-
-	const char* glsl_version = "#version 460";
-	ImGui_ImplGlfw_InitForOpenGL(window.get_handle(), true);
-	ImGui_ImplOpenGL3_Init(glsl_version);
-
 	bool show_demo_window = true;
 	{
 		glew_guard_t glew_guard;
 		demo_widget_t demo;
 		sim_widget_t sim;
-		framebuffer_widget_t framebuffer_widget;
 
 		auto program_ptr = ([&] () {
 			auto [program, info_log] = gen_basic_shader_program();
@@ -2198,33 +2276,13 @@ int main() {
 
 			physics.update(0.01f);
 
-			pass.execute_action([&] (framebuffer_t& fbo) {
-				render_seq.draw();
-			});
-
 			// TODO : default framebuffer setup
 			auto [w, h] = window.get_framebuffer_size();
-			glBindFramebuffer(GL_FRAMEBUFFER, 0);
-			glClearColor(0.2, 0.2, 0.2, 1.0);
-			glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
-			glViewport(0, 0, w, h);
-
-			ImGui_ImplOpenGL3_NewFrame();
-			ImGui_ImplGlfw_NewFrame();
-			ImGui::NewFrame();
-
-			framebuffer_widget.render(reinterpret_cast<ImTextureID>(fbo_color->id), fbo_color->width, fbo_color->height);
-
-			ImGui::Render();
-			ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+			glBindFramebuffer(GL_FRAMEBUFFER, 0);		
 
 			window.swap_buffers();
 		}
 	}
-
-	ImGui_ImplOpenGL3_Shutdown();
-	ImGui_ImplGlfw_Shutdown();
-	ImGui::DestroyContext();
 
 	return 0;
 }
