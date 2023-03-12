@@ -888,10 +888,8 @@ void main() {
 			}
 
 			void clear() {
-				head = 0;
-				for (int i = 1; i < handles.size(); i++) {
-					handles[i - 1] = i;
-				} handles.back() = null_handle;
+				head = null_handle;
+				handles.clear();
 			}
 
 			std::size_t get_use_count() const {
@@ -1021,6 +1019,10 @@ void main() {
 				} return {};
 			}
 
+			void clear() {
+				cache.clear();
+			}
+
 		private:
 			std::unordered_map<std::string, resource_ptr_t> cache;
 		};
@@ -1032,11 +1034,11 @@ void main() {
 			using cache_t = resource_cache_t<resource_t>;
 
 			if (auto it = caches.find(resource_id<resource_t>); it != caches.end()) {
-				return it->second.get<cache_t>();
+				return *it->second.get<cache_t>();
 			}
 			auto [it, inserted] = caches.insert({resource_id<resource_t>, resource_storage_t::create<cache_t>()});
 			assert(inserted);
-			return it->second.get<cache_t>();
+			return *it->second.get<cache_t>();
 		}
 
 	public:
@@ -1055,8 +1057,17 @@ void main() {
 			acquire_cache<resource_t>().get(name);
 		}
 
+		template<class resource_t>
+		void clear() {
+			acquire_cache<resource_t>().clear();
+		}
+
+		void clear_all() {
+			caches.clear();
+		}
+
 	private:
-		std::unordered_map<std::string, resource_cache_t> caches;
+		std::unordered_map<std::size_t, resource_storage_t> caches;
 	};
 
 	class component_registry_t {
@@ -1068,7 +1079,7 @@ void main() {
 		class component_entry_if_t {
 		public:
 			virtual ~component_entry_if_t() {}
-			virtual void del(handle_t handle) = 0;
+			virtual void remove(handle_t handle) = 0;
 		};
 
 		template<class component_t>
@@ -1127,6 +1138,10 @@ void main() {
 				return components.end();
 			}
 
+			void clear() {
+				components.clear();
+			}
+
 		private:
 			std::unordered_map<handle_t, component_t> components;
 		};
@@ -1148,7 +1163,7 @@ void main() {
 	public:
 		void release(handle_t handle) {
 			for (auto& [id, entry] : entries) {
-				entry.get_if()->del(handle);
+				entry.get_if()->remove(handle);
 			}
 		}
 
@@ -1213,6 +1228,15 @@ void main() {
 			}
 		}
 
+		template<class component_t>
+		void clear() {
+			acquire_entry<component_t>().clear();
+		}
+
+		void clear_all() {
+			entries.clear();
+		}
+
 	private:
 		std::unordered_map<std::size_t, component_storage_t> entries;
 	};
@@ -1261,12 +1285,21 @@ void main() {
 			} return nullptr;
 		}
 
+		void clear() {
+			systems.clear();
+		}
+
 	private:
 		std::unordered_map<std::string, system_storage_t> systems;
 	};
 
 	class engine_ctx_t {
 	public:
+		~engine_ctx_t() {
+			clear();
+		}
+
+
 		template<class resouce_t>
 		void add_resource(const std:::string& name, resource_ptr_t<resource_t> resource) {
 			resources.add<resource_t>(name, std::move(resource));
@@ -1281,6 +1314,16 @@ void main() {
 		void get_resource(const std::string& name) {
 			return resources.get<resource_t>(name);
 		}
+
+		template<class resource_t>
+		void clear_resources() {
+			resources.clear<resource_t>();
+		}
+
+		void clear_all_resources() {
+			resources.clear_all();
+		}
+
 
 		bool is_alive(handle_t handle) const {
 			return handles.is_used(handle) && refcount[handle] > 0;
@@ -1301,20 +1344,22 @@ void main() {
 			return handle;
 		}
 
-		void incref(handle_t handle) {
+		[[nodiscard]] handle_t incref(handle_t handle) {
 			if (!is_alive(handle)) {
 				std::cerr << "trying to incref invalid handle " << handle << std::endl;
-				return;
+				return null_handle;
 			}
 			refcount[handle]++;
-			weakrefcount[handle]++;
+			return handle;
 		}
 
-		void incweakref(handle_t handle) {
+		[[nodiscard]] handle_t incweakref(handle_t handle) {
 			if (!is_alive_weak(handle)) {
 				std::cerr << "trying to weakincref invalid handle " << handle << std::endl;
-				return;
-			} weakrefcount[handle]++;
+				return null_handle;
+			}
+			weakrefcount[handle]++;
+			return handle;
 		}
 
 		void release(handle_t handle) {
@@ -1325,10 +1370,11 @@ void main() {
 			refcount[handle]--;
 			if (refcount[handle] == 0) {
 				component_registry.release(handle);
-			}
-			weakrefcount[handle]--;
-			if (weakrefcount[handle] == 0) {
-				handles.release(handle);
+				
+				weakrefcount[handle]--;
+				if (weakrefcount[handle] == 0) {
+					handles.release(handle);
+				}
 			}
 		}
 
@@ -1405,6 +1451,16 @@ void main() {
 			component_registry.for_each<component_t>(std::forward<func_t>(func));
 		}
 
+		template<class component_t>
+		void clear_components() {
+			component_registry.clear<component_t>();
+		}
+
+		void clear_all_components() {
+			component_registry.clear_all();
+		}
+
+
 		template<class system_t>
 		bool add_system(const std::string& name, std::shared_ptr<system_t> sys) {
 			if (!system_registry.add(name, std::move(sys))) {
@@ -1430,16 +1486,30 @@ void main() {
 			return nullptr;
 		}
 
+		void clear_all_systems() {
+			system_registry.clear();
+		}
+
+
+		void clear() {
+			clear_all_resources();
+			clear_all_components();
+			clear_all_systems();
+			handles.clear();
+			refcount.clear();
+			weakrefcount.clear();
+		}
+
 	private:
 		handle_pool_t handles;
 		std::vector<int> refcount;
 		std::vector<int> weakrefcount;
-		resource_cache_t resources;
-		component_registry_t component_registry;
 		system_registry_t system_registry;
+		component_registry_t component_registry;
+		resource_cache_t resources;
 	};
 
-	// it is just an utility
+	// it is just an utility, wrapper of handle_T
 	class entity_t {
 	public:
 		entity_t(engine_ctx_t* _ctx) : ctx{_ctx}, handle{_ctx->acquire()} {}
@@ -1478,12 +1548,12 @@ void main() {
 			return ctx->is_alive_weak(handle);
 		}
 
-		void incref() {
-			ctx->incref(handle);
+		[[nodiscard]] handle_t incref() {
+			return ctx->incref(handle);
 		}
 
-		void incweakref() {
-			ctx->weakincref(handle);
+		[[nodiscard]] incweakref() {
+			return ctx->incweakref(handle);
 		}
 
 		void release() {
@@ -1850,9 +1920,19 @@ void main() {
 	public:
 		timer_system_t(engine_ctx_t* ctx) : system_if_t(ctx) {}
 
+	private:
+		void update_timer(timer_component_t& timer, tick_t dt) {
+			while (dt > tick_t(0)) {
+				if (auto action = timer.update(dt)) {
+					action();
+				}
+			}
+		}
+
+	public:
 		void update(tick_t dt) {
 			for (auto& [handle, timer] : get_ctx()->iterate_components<timer_component_t>()) {
-				timer.update(dt);
+				update_timer(timer, dt);
 			}
 		}
 	};
@@ -1924,14 +2004,10 @@ void main() {
 		}
 	};
 
-	struct basic_resources_info_t {
-		int width{};
-		int height{};
-	};
 
 	class basic_resources_system_t : public system_if_t {
 	public:
-		basic_resources_system_t(engine_ctx_t* ctx, const basic_resources_info_t& info) : system_if_t(ctx) {
+		basic_resources_system_t(engine_ctx_t* ctx, int tex_width, int tex_height) : system_if_t(ctx) {
 			auto program_ptr = ([&] () {
 				auto [program, info_log] = gen_basic_shader_program();
 					if (!program.valid()) {
@@ -1943,8 +2019,8 @@ void main() {
 
 			auto sphere_mesh_ptr = std::make_shared<mesh_t>(gen_sphere_mesh(1));
 			auto sphere_vao_ptr = std::make_shared<vertex_array_t>(gen_vertex_array_from_mesh(*sphere_mesh_ptr));
-			auto color = std::make_shared<texture_t>(gen_empty_texture(info.width, info.height, Rgba32f));
-			auto depth = std::make_shared<texture_t>(gen_depth_texture(info.width, info.height, Depth32f));
+			auto color = std::make_shared<texture_t>(gen_empty_texture(tex_width, tex_height, Rgba32f));
+			auto depth = std::make_shared<texture_t>(gen_depth_texture(tex_width, tex_height, Depth32f));
 
 			ctx->add_resource<shader_program_t>("basic_program", std::move(program_ptr));
 			ctx->add_resource<mesh_t>("sphere", std::move(sphere_mesh_ptr));
@@ -1952,6 +2028,14 @@ void main() {
 			ctx->add_resource<texture_t>("color", std::move(color));
 			ctx->add_resource<texture_t>("depth", std::move(depth));
 		}
+
+		~basic_resources_system_t() {
+			ctx->remove_resource<texture_t>("depth");
+			ctx->remove_resource<texture_t>("color");
+			ctx->remove_resource<vertex_array_t>("sphere");
+			ctx->remove_resource<mesh_t>("sphere");
+			ctx->remove_resource<shader_program_t>("basic_program");
+		} 
 	};
 
 	struct camera_t {
@@ -1959,12 +2043,11 @@ void main() {
 			return glm::translate(glm::lookAt(eye, center, up), -eye);
 		}
 
-		glm::mat4 get_proj() const {
+		glm::mat4 get_proj(float aspect_ratio) const {
 			return glm::perspective(glm::radians(45.0f), aspect_ratio, near, far);
 		}
 
 		float fov{};
-		float aspect_ratio{};
 		float near{};
 		float far{};
 		glm::vec3 eye{};
@@ -1986,13 +2069,17 @@ void main() {
 	};
 
 	struct viewport_t {
+		float get_aspect_ratio() const {
+			return (float)width / height;
+		}
+
 		int x{}, y{}, width{}, height{};
 	};
 
 	struct basic_pass_t : public ctx_component_t {
 		~basic_pass_component_t() {
-			ctx->release(camera);
-			ctx->release(light);
+			ctx->release_weak(camera);
+			ctx->release_weak(light);
 		}
 
 		resource_ptr_t<framebuffer_t> framebuffer;
@@ -2006,8 +2093,9 @@ void main() {
 	// TODO : instanced rendering
 	class basic_renderer_system_t : public system_if_t {
 	public:
-		basic_renderer_system_t(engine_ctx_t* ctx, resource_ptr_t<shader_program_t> _program)
-			: system_if_t(ctx),  program{std::move(_program)} {}
+		basic_renderer_system_t(engine_ctx_t* ctx) : system_if_t(ctx) {
+			program = get_ctx()->get_resource<shader_program_t>("basic_program");
+		}
 
 	private:
 		void render_pass(basic_pass_t* pass, camera_t* camera, omnidir_light_t* light) {
@@ -2055,7 +2143,7 @@ void main() {
 
 			program->use();
 			program->set_mat4("u_v", camera->get_view());
-			program->set_mat4("u_p", camera->get_proj());
+			program->set_mat4("u_p", camera->get_proj(viewport.get_aspect_ratio()));
 			program->set_vec3("u_eye_pos", camera->eye);
 			program->set_vec3("u_ambient_color", light->ambient);
 			program->set_vec3("u_light_color", light->color);
@@ -2121,6 +2209,8 @@ void main() {
 			ImGui::StyleColorsDark();
 			ImGui_ImplGlfw_InitForOpenGL(window, true);
 			ImGui_ImplOpenGL3_Init(version.c_str());
+
+			texture = get_ctx()->get_resource<texture_t>("color");
 		}
 
 		~imgui_system_t() {
@@ -2137,6 +2227,10 @@ void main() {
 		}
 
 	public:
+		void set_texture(resource_ptr_t<texture_t> value) {
+			texture = std::move(value);
+		}
+
 		void update() {
 			// TODO : save/restore utility
 			struct save_restore_render_state_t {
@@ -2194,6 +2288,26 @@ void main() {
 		framebuffer_widget_t framebuffer_widget{};
 		resource_ptr_t<texture_t> texture{};
 	};
+
+
+	class window_system_t : public system_if_t {
+	public:
+		window_system_t(engine_ctx_t* ctx, int window_width, int window_height) : system_if_t(ctx) {
+			glfw_guard = std::make_unique<glfw::guard_t>();
+			window = std::make_unique<glfw::window_t>(glfw::window_params_t::create_basic_opengl("yin-yang", window_width, window_height, 4, 6));
+			window->make_ctx_current();
+			glew_guard = std::make_unique<glew_guard_t>();
+		}
+
+		window_t& get_window() {
+			return *window;
+		}
+
+	private:
+		std::unique_ptr<glfw::guard_t> glfw_guard;
+		std::unique_ptr<glfw::window_t> window;
+		std::unique_ptr<glew_guard_t> glew_guard;
+	}
 
 
 	using seed_t = std::uint64_t;
@@ -2260,6 +2374,7 @@ void main() {
 		float_gen_t h_gen, s_gen, l_gen;
 	};
 
+	// TODO : test
 	glm::vec3 hsl_to_rgb(const glm::vec3& hsl) {
 		float h = hsl.x, s = hsl.y, l = hsl.z;
 
@@ -2293,6 +2408,7 @@ void main() {
 
 	using hsv_color_gen_t = hsl_color_gen_t;
 
+	// TODO : test
 	glm::vec3 hsv_to_rgb(const glm::vec3& hsv) {
 		float h = hsv.x, s = hsv.y, v = hsv.z;
 
@@ -2356,6 +2472,8 @@ void main() {
 			rgb_color_gen_t color_gen(42);
 
 			int count = 500;
+
+			ball_handles.clear();
 			for (int i = 0; i < count; i++) {
 				float rx = coord_gen.gen(), ry = coord_gen.gen(), rz = coord_gen.gen();
 				float vx = vel_gen.gen(), vy = vel_gen.gen(), vz = vel_gen.gen();
@@ -2376,6 +2494,8 @@ void main() {
 				object.add_component(transform);
 				object.add_component(material);
 				object.add_component<sync_transform_physics_t>();
+
+				ball_handles.push_back(object.incweakref(););
 			}
 		}
 
@@ -2387,14 +2507,14 @@ void main() {
 				.translation = glm::vec3(0.0f)
 			};
 			attractor_t attractor = {
-				.pos = glm::vec3(0.0f);
-				.gm = 1000.0f;
-				.min_dist = 2.0f;
-				.max_dist = 200.0f;
-				.drag_min_coef = 0.2;
-				.drag_max_coef = 1.0f;
-				.drag_min_dist = 0.0f;
-				.drag_max_dist = 5.0f;
+				.pos = glm::vec3(0.0f),
+				.gm = 1000.0f,
+				.min_dist = 2.0f,
+				.max_dist = 200.0f,
+				.drag_min_coef = 0.2,
+				.drag_max_coef = 1.0f,
+				.drag_min_dist = 0.0f,
+				.drag_max_dist = 5.0f,
 			};
 			basic_material_t material = {
 				.color = glm::vec3(1.0f, 0.0f, 0.0f),
@@ -2408,12 +2528,26 @@ void main() {
 			object.add_component(attractor);
 			object.add_component(material);
 			object.add_component<sync_transform_attractor_t>();
+
+			attractor_handle = object.incweakref();
+		}
+
+		void create_light() {
+			omnidir_light_t light = {
+				.ambient = glm::vec3(0.2f),
+				.color = glm::vec3(1.0f),
+				.pos = glm::vec3(5.0f),
+			};
+
+			entity_t object(get_ctx());
+			object.add_component(light);
+
+			light_handle = object.incweakref();
 		}
 
 		void create_viewer() {
 			camera_t camera = {
 				.fov = gml::radians(60.0f),
-				.aspect_ratio = /*TODO*/,
 				.near = 1.0f,
 				.far = 200.0f,
 				.eye = glm::vec3(10.0f, 0.0, 0.0),
@@ -2423,32 +2557,209 @@ void main() {
 
 			entity_t object(get_ctx());
 			object.add_component(camera);
-			object.weakincref();
 
-			viewer = object.get_handle();
+			viewer_handle = object.incweakref();
 		} 
 
+		void create_basic_pass() {
+			auto* ctx = get_ctx();
+
+			auto color = ctx->get_resource<texture_t>("color");
+			auto depth = ctx->get_resource<texture_t>("depth");
+			auto framebuffer = std::make_shared<framebuffer_t>(framebuffer_t::create());
+			framebuffer->attach({Color0, color->id});
+			framebuffer->attach({Depth, depth->id});
+			
+			entity_t basic_pass(ctx);
+			basic_pass.add_component(basic_pass_t{
+					.ctx = ctx,
+					.framebuffer = std::move(framebuffer),
+					.viewport = {0, 0, color->width, color->height},
+					.clear_color = glm::vec3(0.0f);
+					.clear_depth = 0.0f;
+					.camera = ctx->incweakref(camera_handle),
+					.light = ctx->incweakref(light_handle),
+				}
+			);
+
+			basic_pass_handle = basic_pass.get_handle();
+		}
+
+		void create_imgui_pass() {
+			auto* ctx = get_ctx();
+
+			auto& window = ctx->get_system<window_system_t>()->get_window();
+			auto [width, height] = window.get_framebuffer_size();
+
+			entity_t imgui_pass(ctx);
+			imgui_pass.add_component(imgui_pass_t{
+				.ctx = ctx,
+				.framebuffer = std::make_shared<framebuffer_t>(),
+				.viewport = {0, 0, width, height},
+				.clear_color = glm::vec3(1.0f, 0.5f, 0.25f),
+				.clear_depth = 1.0f,
+			});
+
+			imgui_pass_handle = imgui_pass.get_handle();
+		}
+
 		void create_passes() {
-			// TODO
+			create_basic_pass();
+			create_imgui_pass();
 		}
 
 	public:
 		level_system_t(engine_ctx_t* ctx) : system_if_t(_ctx) {
 			create_balls();
 			create_attractors();
+			create_light();
 			create_viewer();
 			create_passes();
 		}
 
 		~level_system_t() {
-			// TODO : destroy
+			auto* ctx = get_ctx();
+			for (auto& ball : ball_handles) {
+				ctx->release_weak(ball);
+			}
+			ctx->release_weak(attractor_handle);
+			ctx->release_weak(light_handle);
+			ctx->release_weak(viewer_handle);
+
+			ctx->release(basic_pass_handle);
+			ctx->release(imgui_pass_handle);
 		}
 
 	private:
-		handle_t viewer{};
+		std::vector<handle_t> ball_handles;
+		handle_t attractor_handle{};
+		handle_t light_handle{};
+		handle_t viewer_handle{};
+		handle_t basic_pass_handle{};
+		handle_t imgui_pass_handle{};
 	};
 
-	// TODO : mainloop
+	class mainloop_if_t {
+	public:
+		virtual ~mainloop_if_t() {}
+		virtual void execute() = 0;
+	};
+
+	class mainloop_t : public mainloop_if_t {
+	public:
+		mainloop_t(engine_ctx_t* _ctx) : ctx{_ctx} {
+			constexpr int window_width = 512;
+			constexpr int window_height = 512;
+			constexpr int tex_width = 480;
+			constexpr int tex_height = 480;
+
+			physics_system_info_t physics_system_info{
+				.eps = 1e-6f,
+				.overlap_coef = 0.4f,
+				.overlap_resolution_iters = 2,
+				.movement_limit = 200.0f,
+				.velocity_limit = 200.0f,
+				.impact_cor = 0.8f,
+				.impact_v_loss = 1e-3f,
+				.dt_split = 2,
+			};
+
+			window_system = std::make_shared<window_system_t>(ctx, window_width, window_height);
+			ctx->add_system("window", window_system);
+
+			basic_resources_system = std::make_shared<basic_resources_system_t>(ctx, tex_width, tex_height);
+			ctx->add_system("basic_resources", basic_resources_system);
+
+			basic_renderer_system = std::make_shared<basic_renderer_system_t>(ctx);
+			ctx->add_system("basic_renderer", basic_renderer_system);
+
+			imgui_system = std::make_shared<imgui_system_t>(ctx);
+			ctx->add_system("imgui", imgui_system);
+
+			physics_system = std::make_shared<physics_system_t>(ctx, physics_system_info);
+			ctx->add_system("physics", physics_system);
+
+			sync_transform_physics_system = std::make_shared<sync_transform_physics_t>();
+			ctx->add_system("sync_transform_physics", sync_transform_physics_system);
+
+			sync_transform_attractor_system = std::make_shared<sync_transform_attractor_system_t>();
+			ctx->add_system("sync_transform_attractor", sync_transform_attractor_system);
+
+			timer_system = std::make_shared<timer_system_t>();
+			ctx->add_system("timer", timer_system);
+
+			level_system = std::make_shared<level_system_t>();
+			ctx->add_system("level", level_system);
+		}
+
+		~mainloop_t() {
+			// TODO : clear ctx
+		}
+
+		virtual void execute() override {
+			auto& window = window_system->get_window();
+			auto& physics = *physics_system;
+			auto& basic_renderer = *basic_renderer_system;
+			auto& imgui = *imgui_system;
+			auto& sync_transform_physics = *sync_transform_physics_system;
+			auto& sync_transform_attractor = *sync_transform_attractor_system;
+			auto& timer = *timer_system;
+
+			float dt = 0.01f;
+			while (!window.should_close()) {
+				window.swap_buffers();
+
+				glfw::poll_events();
+
+				timer.update(dt);
+				physics.update(dt);
+				sync_transform_physics.update();
+				sync_transform_attractor.update();
+				basic_renderer.update();
+				imgui.update();
+			}
+		}
+
+		void clear() {
+			// TODO
+		}
+
+	private:
+		engine_ctx_t* ctx{};
+		std::shared_ptr<window_system_t> window_system;
+		std::shared_ptr<basic_resources_system_t> basic_resources_system;
+		std::shared_ptr<basic_renderer_system_t> basic_renderer_system;
+		std::shared_ptr<imgui_system_t> imgui_system;
+		std::shared_ptr<physics_system_t> physics_system;
+		std::shared_ptr<sync_transform_physics_system_t> sync_transform_physics_system;
+		std::shared_ptr<sync_transform_attractor_system_t> sync_transform_attractor_system;
+		std::shared_ptr<timer_system_t> timer_system;
+		std::shared_ptr<level_system_t> level_system;
+	};
+
+	// test class
+	class engine_t {
+	public:
+		engine_t() {
+			ctx = std::make_unique<engine_ctx_t>();
+			mainloop = std::make_unique<mainloop_t>(ctx.get());
+		}
+
+		~engine_t() {
+			// TODO
+			mainloop->reset();
+			ctx->reset();
+		}
+
+		void execute() {
+			mainloop->execute();
+		}
+
+	private:
+		std::unique_ptr<engine_ctx_t> ctx;
+		std::unique_ptr<mainloop_if_t> mainloop;
+	};
+
 	// TODO : ball_spawner_system_t
 	// TODO : fancy_attractor_system_t
 	
@@ -2468,44 +2779,7 @@ void main() {
 }
 
 int main() {
-	constexpr int window_width = 512;
-	constexpr int window_height = 512;
-	constexpr int fbo_width = 480;
-	constexpr int fbo_height = 480;
-
-	glfw::guard_t glfw_guard;
-	glfw::window_t window(glfw::window_params_t::create_basic_opengl("yin-yang", window_width, window_height, 4, 6));
-
-	window.make_ctx_current();
-
-	bool show_demo_window = true;
-	{
-		glew_guard_t glew_guard;
-
-		physics_system_info_t physics_system_info{
-			.eps = 1e-6f,
-			.overlap_coef = 0.4f,
-			.overlap_resolution_iters = 2,
-			.movement_limit = 200.0f,
-			.velocity_limit = 200.0f,
-			.impact_cor = 0.8f,
-			.impact_v_loss = 1e-3f,
-			.dt_split = 3,
-		};
-		physics_system_t physics(physics_system_info);
-
-		while (!window.should_close()) {
-			glfw::poll_events();
-
-			physics.update(0.01f);
-
-			// TODO : default framebuffer setup
-			auto [w, h] = window.get_framebuffer_size();
-			glBindFramebuffer(GL_FRAMEBUFFER, 0);		
-
-			window.swap_buffers();
-		}
-	}
-
+	engine_t engine;
+	engine.execute();
 	return 0;
 }

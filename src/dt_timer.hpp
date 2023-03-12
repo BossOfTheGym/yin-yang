@@ -16,26 +16,22 @@ public:
 	dt_timer_t(handler_t&& handler, value_t _delay, value_t _tick, bool _single_shot)
 		: timeout{std::forward<timeout_t>(handler)}, delay{_delay}, tick{_tick}, single_shot{_single_shot} {}
 
-	timeout_action_t update(value_t dt) {
+	// dt = 0 => update finished
+	timeout_action_t update(value_t& dt) {
 		if (fired) {
+			dt = value_t(0);
 			return {};
 		}
 
-		if (delay > value_t(0)) {
-			value_t cut = std::min(delay, dt);
-			delay -= cut;
-			dt -= cut;
-		}
-
-		t += dt;
-		while (t >= tick) {
-			t -= tick;
-			if (timeout) {
-				timeout();
-			} if (single_shot) {
+		value_t cut = std::min(delay, dt);
+		delay -= cut;
+		dt -= cut;
+		if (delay <= value_t(0)) {
+			if (single_shot) {
 				fired = true;
-				break;
-			}
+			} if (timeout) {
+				return timeout();
+			} delay = tick;
 		} return {};
 	}
 
@@ -47,14 +43,9 @@ public:
 		delay = value;
 	}
 
-	void set_time(value_t value) {
-		t = value;
-	}
-
-	void reset(value_t tick_value) {
-		t = value_t(0);
-		delay = value_t(0);
-		tick = tick_value;
+	void reset(value_t _tick) {
+		delay = _tick;
+		tick = _tick;
 		fired = false;
 	}
 
@@ -70,7 +61,6 @@ public:
 private:
 	timeout_handler_t timeout;
 	value_t delay{};
-	value_t t{};
 	value_t tick{};
 	bool single_shot{};
 	bool fired{};
