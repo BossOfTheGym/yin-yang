@@ -874,7 +874,7 @@ void main() {
 			}
 
 			bool is_used(handle_t handle) const {
-				if (handle < handles.size()) {
+				if (handle != null_handle && handle < handles.size()) {
 					return handles[handle] == handle;
 				} return false;
 			}
@@ -1097,7 +1097,7 @@ void main() {
 		class component_entry_t : public component_entry_if_t {
 		public:
 			template<class ... args_t>
-			component_t* add(handle_t handle, args_t&& ... args) {
+			component_t* emplace(handle_t handle, args_t&& ... args) {
 				if constexpr(std::is_aggregate_v<component_t>) {
 					if (auto [it, inserted] = components.emplace(std::piecewise_construct,
 						std::forward_as_tuple(handle), std::forward_as_tuple(std::forward<args_t>(args)...)); inserted) {
@@ -1180,8 +1180,8 @@ void main() {
 		}
 
 		template<class component_t, class ... args_t>
-		component_t* add(handle_t handle, args_t&& ... args) {
-			return acquire_entry<component_t>().add(handle, std::forward<args_t>(args)...);
+		component_t* emplace(handle_t handle, args_t&& ... args) {
+			return acquire_entry<component_t>().emplace(handle, std::forward<args_t>(args)...);
 		}
 
 		template<class component_t>
@@ -1191,7 +1191,7 @@ void main() {
 
 		template<class component_t>
 		component_t* add(handle_t handle, component_t&& component) {
-			return acquire_entry<component_t>.add(handle, std::move(component));
+			return acquire_entry<component_t>().add(handle, std::move(component));
 		}
 
 		template<class component_t>
@@ -1306,6 +1306,7 @@ void main() {
 
 	// systems are allowed to own a resource, so they can call get_resource() (well, this can also be not good, but for now they are allowed)
 	// entities are not allowed to own any resource so they MUST call get_resource_ref()
+	// TODO : how to process null_handle ? (most probably, ignore). now null_handle is considered invalid
 	class engine_ctx_t {
 	public:
 		~engine_ctx_t() {
@@ -1401,6 +1402,7 @@ void main() {
 				std::cerr << "trying to release invalid handle " << handle << std::endl;
 				return;
 			}
+			// TODO : we should not decrement if there are any strong refs
 			weakrefcount[handle]--;
 			if (weakrefcount[handle] == 0) {
 				handles.release(handle);
@@ -1412,7 +1414,7 @@ void main() {
 			if (!is_alive(handle)) {
 				std::cerr << "trying to add component to invalid handle " << handle << std::endl;
 				return nullptr;
-			} return component_registry.add<component_t>(handle, std::forward<args_t>(args)...);
+			} return component_registry.emplace<component_t>(handle, std::forward<args_t>(args)...);
 		}
 
 		template<class component_t>
@@ -1428,7 +1430,7 @@ void main() {
 			if (!is_alive(handle)) {
 				std::cerr << "trying to add component to invalid handle " << handle << std::endl;
 				return nullptr;
-			} return component_registry.add<component_t>(handle, component);
+			} return component_registry.add<component_t>(handle, std::move(component));
 		}
 
 		template<class component_t>
@@ -1529,8 +1531,17 @@ void main() {
 	// it is just an utility, wrapper of handle_t
 	class entity_t {
 	public:
+		entity_t() = default;
 		entity_t(engine_ctx_t* _ctx) : ctx{_ctx}, handle{_ctx->acquire()} {}
 		entity_t(engine_ctx_t* _ctx, handle_t _handle) : ctx{_ctx}, handle{_handle} {}
+
+		entity_t(entity_t&&) noexcept = default;
+		entity_t(const entity_t&) = default;
+
+		~entity_t() = default;
+
+		entity_t& operator = (entity_t&&) noexcept = default;
+		entity_t& operator = (const entity_t&) = default;
 
 		template<class component_t, class ... args_t>
 		component_t* add_component(args_t&& ... args) {
@@ -1544,7 +1555,7 @@ void main() {
 
 		template<class component_t>
 		component_t* add_component(component_t&& component) {
-			return ctx->add_component<component_t>(handle, component);
+			return ctx->add_component<component_t>(handle, std::move(component));
 		}
 
 		template<class component_t>
@@ -1565,24 +1576,39 @@ void main() {
 			return ctx->is_alive_weak(handle);
 		}
 
-		[[nodiscard]] handle_t incref() {
-			return ctx->incref(handle);
+		[[nodiscard]] entity_t incref() const {
+			return entity_t{ctx, ctx->incref(handle)};
 		}
 
-		[[nodiscard]] handle_t incweakref() {
-			return ctx->incweakref(handle);
+		[[nodiscard]] entity_t incweakref() const {
+			return entity_t{ctx, ctx->incweakref(handle)};
 		}
 
 		void release() {
 			ctx->release(handle);
+			reset();
 		}
 
 		void release_weak() {
 			ctx->release_weak(handle);
+			reset();
+		}
+
+		engine_ctx_t* get_ctx() const {
+			return ctx;
 		}
 
 		handle_t get_handle() const {
 			return handle;
+		}
+
+		void reset() {
+			ctx = nullptr;
+			handle = null_handle;
+		}
+
+		bool empty() const {
+			return ctx == nullptr;
 		}
 
 	private:
@@ -1590,9 +1616,89 @@ void main() {
 		handle_t handle{null_handle};
 	};
 
-	// inherit from it when you need ctx 
-	struct ctx_component_t {
-		engine_ctx_t* ctx{};
+	// TODO
+	class shared_entity_t {
+	public:
+		shared_entity_t() = default;
+		shared_entity_t(entity_t _entity) : entity{_entity} {}
+		shared_entity_t(const shared_entity_t& another) : entity{another.entity.incref()} {}
+		shared_entity_t(shared_entity_t&& another) noexcept {
+			*this = std::move(another);
+		}
+
+		~shared_entity_t() {
+			if (!empty()) {
+				reset();
+			}
+		}
+
+		shared_entity_t& operator = (entity_t _entity) noexcept {
+			reset();
+			entity = std::move(_entity);
+			return *this;
+		}
+
+		shared_entity_t& operator = (const shared_entity_t& another) {
+			if (this != &another) {
+				reset();
+				entity = another.entity.incref();
+			} return *this;
+		}
+
+		shared_entity_t& operator = (shared_entity_t&& another) noexcept {
+			if (this != &another) {
+				std::swap(entity, another.entity);
+			} return *this;
+		}
+
+		// not enough c++, return entity view
+		entity_t* operator -> () {
+			return &entity;
+		}
+
+		void reset() {
+			assert(!empty());
+			entity.release();
+		}
+
+		bool empty() const {
+			return entity.empty();
+		}
+
+	private:
+		entity_t entity{};
+	};
+
+	// TODO
+	class weak_entity_t {
+	public:
+		weak_entity_t() = default;
+		weak_entity_t(entity_t _entity) : entity{_entity} {}
+		weak_entity_t(const weak_entity_t& another) : entity{another.entity.incweakref()} {}
+		weak_entity_t(weak_entity_t&& another) noexcept {
+			*this = std::move(another);
+		}
+
+		weak_entity_t(const shared_entity_t& shared_entity) : entity{shared_en} {
+
+		}
+
+		~weak_entity_t() {
+			if (!empty()) {
+				reset();
+			}
+		}
+
+		void reset() {
+			entity.release_weak();
+		}
+
+		bool empty() const {
+			return entity.empty();
+		}
+
+	private:
+		entity_t entity{};
 	};
 
 
@@ -2095,18 +2201,42 @@ void main() {
 		int x{}, y{}, width{}, height{};
 	};
 
-	struct basic_pass_t : public ctx_component_t {
-		~basic_pass_t() {
+	class basic_pass_t {
+	public:
+		basic_pass_t(resource_ref_t<framebuffer_t> _framebuffer,
+			const viewport_t& _viewport, const glm::vec4& _clear_color, float _clear_depth,
+			handle_t camera_weak, handle_t light_weak)
+			: framebuffer{std::move(_framebuffer)}
+			, viewport{_viewport}, clear_color{_clear_color}, clear_depth{clear_depth}
+			, camera{camera_weak}, light{light_weak} {}
+
+		basic_pass_t(basic_pass_t&& another) noexcept {
+			*this = std::move(another);
+		}
+
+ 		~basic_pass_t() {
 			ctx->release_weak(camera);
 			ctx->release_weak(light);
 		}
 
+		basic_pass_t& operator = (basic_pass_t&& another) noexcept {
+			if (this != &another) {
+				std::swap(framebuffer, another.framebuffer);
+				std::swap(viewport, another.viewport);
+				std::swap(clear_color, another.clear_color);
+				std::swap(clear_depth, another.clear_depth);
+				std::swap(camera, another.camera);
+				std::swap(light, another.camera);
+			} return *this;
+		}
+
+	//private:
 		resource_ref_t<framebuffer_t> framebuffer;
 		viewport_t viewport{};
 		glm::vec4 clear_color{};
 		float clear_depth{};
-		handle_t camera{};
-		handle_t light{};
+		handle_t camera{null_handle};
+		handle_t light{null_handle};
 	};
 
 	// TODO : instanced rendering
@@ -2609,18 +2739,14 @@ void main() {
 			framebuffer->attach(framebuffer_attachment_t{Depth, depth->id});
 			ctx->add_resource<framebuffer_t>("frame", framebuffer);
 			
-			basic_pass_t pass = {
-				.framebuffer = framebuffer,
-				.viewport = {0, 0, color->width, color->height},
-				.clear_color = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f),
-				.clear_depth = 0.0f,
-				.camera = ctx->incweakref(viewer_handle),
-				.light = ctx->incweakref(light_handle),
-			};
-			pass.ctx = ctx;
-
 			entity_t basic_pass(ctx);
-			basic_pass.add_component(pass);
+			basic_pass.add_component(
+				basic_pass_t{
+					ctx, framebuffer,
+					viewport_t{0, 0, color->width, color->height}, glm::vec4(0.0f, 0.0f, 0.0f, 1.0f), 1.0f,
+					ctx->incweakref(viewer_handle), ctx->incweakref(light_handle),
+				}
+			);
 
 			basic_pass_handle = basic_pass.incref();
 		}
@@ -2765,7 +2891,7 @@ void main() {
 			ctx->remove_system("basic_renderer");
 			basic_renderer_system.reset();
 
-			ctx->remove_system("basic_resources_system");
+			ctx->remove_system("basic_resources");
 			basic_resources_system.reset();
 
 			ctx->remove_system("window");
