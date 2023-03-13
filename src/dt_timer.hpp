@@ -6,7 +6,6 @@
 using timeout_action_t = std::function<void()>;
 using timeout_handler_t = std::function<timeout_action_t()>;
 
-// TODO : rework
 template<class __value_t>
 class dt_timer_t {
 public:
@@ -14,7 +13,7 @@ public:
 
 	template<class handler_t>
 	dt_timer_t(handler_t&& handler, value_t _delay, value_t _tick, bool _single_shot)
-		: timeout{std::forward<timeout_t>(handler)}, delay{_delay}, tick{_tick}, single_shot{_single_shot} {}
+		: timeout{std::forward<handler_t>(handler)}, delay{_delay}, tick{_tick}, single_shot{_single_shot} {}
 
 	// dt = 0 => update finished
 	timeout_action_t update(value_t& dt) {
