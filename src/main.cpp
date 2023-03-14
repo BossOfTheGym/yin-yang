@@ -1093,6 +1093,8 @@ void main() {
 			virtual void remove(handle_t handle) = 0;
 		};
 
+		using component_storage_t = if_storage_t<component_entry_if_t>;
+
 		template<class component_t>
 		class component_entry_t : public component_entry_if_t {
 		public:
@@ -1157,8 +1159,6 @@ void main() {
 		private:
 			std::unordered_map<handle_t, component_t> components;
 		};
-
-		using component_storage_t = if_storage_t<component_entry_if_t>;
 
 		template<class component_t>
 		auto& acquire_entry() {
@@ -1307,6 +1307,7 @@ void main() {
 	// systems are allowed to own a resource, so they can call get_resource() (well, this can also be not good, but for now they are allowed)
 	// entities are not allowed to own any resource so they MUST call get_resource_ref()
 	// TODO : how to process null_handle ? (most probably, ignore). now null_handle is considered invalid
+	// TODO : releasing a handle during destruction causes crash
 	class engine_ctx_t {
 	public:
 		~engine_ctx_t() {
@@ -1616,7 +1617,6 @@ void main() {
 		handle_t handle{null_handle};
 	};
 
-	// TODO
 	class shared_entity_t {
 	public:
 		shared_entity_t() = default;
@@ -1651,9 +1651,8 @@ void main() {
 			} return *this;
 		}
 
-		// not enough c++, return entity view
-		entity_t* operator -> () {
-			return &entity;
+		entity_t& get() {
+			return entity;
 		}
 
 		void reset() {
@@ -1669,7 +1668,6 @@ void main() {
 		entity_t entity{};
 	};
 
-	// TODO
 	class weak_entity_t {
 	public:
 		weak_entity_t() = default;
@@ -1679,17 +1677,37 @@ void main() {
 			*this = std::move(another);
 		}
 
-		weak_entity_t(const shared_entity_t& shared_entity) : entity{shared_en} {
-
-		}
-
 		~weak_entity_t() {
 			if (!empty()) {
 				reset();
 			}
 		}
 
+		weak_entity_t& operator = (entity_t _entity) noexcept {
+			reset();
+			entity = std::move(_entity);
+			return *this;
+		}
+
+		weak_entity_t& operator = (const weak_entity_t& another) {
+			if (this != &another) {
+				reset();
+				entity = another.entity.incweakref();
+			} return *this;
+		}
+
+		weak_entity_t& operator = (weak_entity_t&& another) noexcept {
+			if (this != &another) {
+				std::swap(entity, another.entity);
+			} return *this;
+		}
+
+		entity_t& get() {
+			return entity;
+		}
+
 		void reset() {
+			assert(!empty());
 			entity.release_weak();
 		}
 
@@ -2201,42 +2219,13 @@ void main() {
 		int x{}, y{}, width{}, height{};
 	};
 
-	class basic_pass_t {
-	public:
-		basic_pass_t(resource_ref_t<framebuffer_t> _framebuffer,
-			const viewport_t& _viewport, const glm::vec4& _clear_color, float _clear_depth,
-			handle_t camera_weak, handle_t light_weak)
-			: framebuffer{std::move(_framebuffer)}
-			, viewport{_viewport}, clear_color{_clear_color}, clear_depth{clear_depth}
-			, camera{camera_weak}, light{light_weak} {}
-
-		basic_pass_t(basic_pass_t&& another) noexcept {
-			*this = std::move(another);
-		}
-
- 		~basic_pass_t() {
-			ctx->release_weak(camera);
-			ctx->release_weak(light);
-		}
-
-		basic_pass_t& operator = (basic_pass_t&& another) noexcept {
-			if (this != &another) {
-				std::swap(framebuffer, another.framebuffer);
-				std::swap(viewport, another.viewport);
-				std::swap(clear_color, another.clear_color);
-				std::swap(clear_depth, another.clear_depth);
-				std::swap(camera, another.camera);
-				std::swap(light, another.camera);
-			} return *this;
-		}
-
-	//private:
+	struct basic_pass_t {
 		resource_ref_t<framebuffer_t> framebuffer;
 		viewport_t viewport{};
 		glm::vec4 clear_color{};
 		float clear_depth{};
-		handle_t camera{null_handle};
-		handle_t light{null_handle};
+		weak_entity_t camera{};
+		weak_entity_t light{};
 	};
 
 	// TODO : instanced rendering
@@ -2332,15 +2321,15 @@ void main() {
 	public:
 		void update() {
 			for (auto& [handle, pass] : get_ctx()->iterate_components<basic_pass_t>()) {
-				auto* camera = get_ctx()->get_component<camera_t>(pass.camera);
+				auto* camera = pass.camera.get().get_component<camera_t>();
 				if (!camera) {
-					std::cerr << "missing camera component. handle: " << handle << " camera: " << pass.camera << std::endl;
+					std::cerr << "missing camera component. handle: " << handle << " camera: " << pass.camera.get().get_handle() << std::endl;
 					continue;
 				}
 
-				auto* light = get_ctx()->get_component<omnidir_light_t>(pass.light);
+				auto* light = pass.light.get().get_component<omnidir_light_t>();
 				if (!light) {
-					std::cerr << "missing light component. handle: " << handle << " light: " << pass.light << std::endl;
+					std::cerr << "missing light component. handle: " << handle << " light: " << pass.light.get().get_handle() << std::endl;
 					continue;
 				}
 
@@ -2636,17 +2625,17 @@ void main() {
 			float_gen_t mass_gen(42, 0.5f, 1.0f);
 			float_gen_t rad_gen(42, 0.3f, 1.0f);
 			float_gen_t coord_gen(42, -50.0f, +50.0f);
-			float_gen_t vel_gen(42, -10.0f, +10.0f);
+			float_gen_t vel_gen(42, -30.0f, +30.0f);
 			rgb_color_gen_t color_gen(42);
 
-			int count = 500;
+			int count = 200;
 
 			ball_handles.clear();
 			for (int i = 0; i < count; i++) {
 				float rx = coord_gen.gen(), ry = coord_gen.gen(), rz = coord_gen.gen();
 				float vx = vel_gen.gen(), vy = vel_gen.gen(), vz = vel_gen.gen();
-				float radius = rad_gen.gen();
-				float mass = mass_gen.gen();
+				float radius = 0.5f;//rad_gen.gen();
+				float mass = 1.0f;//mass_gen.gen();
 
 				transform.scale = glm::vec3(radius);
 
@@ -2663,7 +2652,7 @@ void main() {
 				object.add_component(material);
 				object.add_component<sync_transform_physics_t>();
 
-				ball_handles.push_back(object.incweakref());
+				ball_handles.push_back(object.incweakref().get_handle());
 			}
 		}
 
@@ -2682,7 +2671,7 @@ void main() {
 				.drag_min_coef = 0.2,
 				.drag_max_coef = 1.0f,
 				.drag_min_dist = 0.0f,
-				.drag_max_dist = 5.0f,
+				.drag_max_dist = 7.0f,
 			};
 			basic_material_t material = {
 				.color = glm::vec3(1.0f, 0.0f, 0.0f),
@@ -2697,7 +2686,7 @@ void main() {
 			object.add_component(material);
 			object.add_component<sync_transform_attractor_t>();
 
-			attractor_handle = object.incweakref();
+			attractor_handle = object.incweakref().get_handle();
 		}
 
 		void create_light() {
@@ -2710,7 +2699,7 @@ void main() {
 			entity_t object(get_ctx());
 			object.add_component(light);
 
-			light_handle = object.incweakref();
+			light_handle = object.incweakref().get_handle();
 		}
 
 		void create_viewer() {
@@ -2726,7 +2715,7 @@ void main() {
 			entity_t object(get_ctx());
 			object.add_component(camera);
 
-			viewer_handle = object.incweakref();
+			viewer_handle = object.incweakref().get_handle();
 		} 
 
 		void create_basic_pass() {
@@ -2737,18 +2726,19 @@ void main() {
 			auto framebuffer = std::make_shared<framebuffer_t>(framebuffer_t::create());
 			framebuffer->attach(framebuffer_attachment_t{Color0, color->id});
 			framebuffer->attach(framebuffer_attachment_t{Depth, depth->id});
+
 			ctx->add_resource<framebuffer_t>("frame", framebuffer);
-			
+
+			entity_t viewer(ctx, viewer_handle);
+			entity_t light(ctx, light_handle);
 			entity_t basic_pass(ctx);
-			basic_pass.add_component(
-				basic_pass_t{
-					ctx, framebuffer,
-					viewport_t{0, 0, color->width, color->height}, glm::vec4(0.0f, 0.0f, 0.0f, 1.0f), 1.0f,
-					ctx->incweakref(viewer_handle), ctx->incweakref(light_handle),
-				}
+			basic_pass.add_component<basic_pass_t>(
+				framebuffer, viewport_t{0, 0, color->width, color->height},
+				glm::vec4(0.0f, 0.0f, 0.0f, 1.0f), 1.0f,
+				viewer.incweakref(), light.incweakref()
 			);
 
-			basic_pass_handle = basic_pass.incref();
+			basic_pass_handle = basic_pass.incref().get_handle();
 		}
 
 		void create_imgui_pass() {
@@ -2768,7 +2758,7 @@ void main() {
 				.clear_depth = 1.0f,
 			});
 
-			imgui_pass_handle = imgui_pass.incref();
+			imgui_pass_handle = imgui_pass.incref().get_handle();
 		}
 
 		void create_passes() {
@@ -2820,10 +2810,10 @@ void main() {
 	class mainloop_t : public mainloop_if_t {
 	public:
 		mainloop_t(engine_ctx_t* _ctx) : ctx{_ctx} {
-			constexpr int window_width = 512;
-			constexpr int window_height = 512;
-			constexpr int tex_width = 480;
-			constexpr int tex_height = 480;
+			constexpr int window_width = 300;
+			constexpr int window_height = 300;
+			constexpr int tex_width = 280;
+			constexpr int tex_height = 280;
 
 			physics_system_info_t physics_system_info{
 				.eps = 1e-6f,
@@ -2832,8 +2822,8 @@ void main() {
 				.movement_limit = 200.0f,
 				.velocity_limit = 200.0f,
 				.impact_cor = 0.8f,
-				.impact_v_loss = 1e-3f,
-				.dt_split = 2,
+				.impact_v_loss = 0.99f,
+				.dt_split = 8,
 			};
 
 			window_system = std::make_shared<window_system_t>(ctx, window_width, window_height);
@@ -2907,7 +2897,7 @@ void main() {
 			auto& sync_transform_attractor = *sync_transform_attractor_system;
 			auto& timer = *timer_system;
 
-			float dt = 0.01f;
+			float dt = 0.017f;
 			while (!window.should_close()) {
 				window.swap_buffers();
 
