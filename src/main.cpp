@@ -2952,6 +2952,8 @@ void main() {
 	// TODO : ball_spawner_system_t
 	// TODO : fancy_attractor_system_t
 	
+	// TODO : logging
+
 	// TODO : advanced physics
 	// TODO : grid update method
 	// TODO : multithreaded update
