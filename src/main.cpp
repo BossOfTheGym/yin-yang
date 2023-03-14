@@ -1072,7 +1072,7 @@ void main() {
 			acquire_entry<resource_t>().clear();
 		}
 
-		void clear_all() {
+		void clear() {
 			entries.clear();
 		}
 
@@ -1091,6 +1091,7 @@ void main() {
 		public:
 			virtual ~component_entry_if_t() {}
 			virtual void remove(handle_t handle) = 0;
+			virtual void clear() = 0;
 		};
 
 		using component_storage_t = if_storage_t<component_entry_if_t>;
@@ -1152,8 +1153,12 @@ void main() {
 				return components.end();
 			}
 
-			void clear() {
-				components.clear();
+			virtual void clear() override {
+				auto first = begin(), last = end();
+				while (first != last) {
+					auto curr = first++;
+					components.erase(curr);
+				}
 			}
 
 		private:
@@ -1245,8 +1250,10 @@ void main() {
 			acquire_entry<component_t>().clear();
 		}
 
-		void clear_all() {
-			entries.clear();
+		void clear() {
+			for (auto& [id, entry] : entries) {
+				entry.get_if()->clear();
+			}
 		}
 
 	private:
@@ -1340,8 +1347,8 @@ void main() {
 			resource_registry.clear<resource_t>();
 		}
 
-		void clear_all_resources() {
-			resource_registry.clear_all();
+		void clear_resources() {
+			resource_registry.clear();
 		}
 
 
@@ -1477,8 +1484,8 @@ void main() {
 			component_registry.clear<component_t>();
 		}
 
-		void clear_all_components() {
-			component_registry.clear_all();
+		void clear_components() {
+			component_registry.clear();
 		}
 
 
@@ -1506,15 +1513,15 @@ void main() {
 			return nullptr;
 		}
 
-		void clear_all_systems() {
+		void clear_systems() {
 			system_registry.clear();
 		}
 
 
 		void clear() {
-			clear_all_resources();
-			clear_all_components();
-			clear_all_systems();
+			clear_components();
+			clear_resources();
+			clear_systems();
 			handles.clear();
 			refcount.clear();
 			weakrefcount.clear();
@@ -2707,7 +2714,7 @@ void main() {
 				.fov = glm::radians(60.0f),
 				.near = 1.0f,
 				.far = 200.0f,
-				.eye = glm::vec3(10.0f, 0.0, 0.0),
+				.eye = glm::vec3(20.0f, 0.0, 0.0),
 				.center = glm::vec3(0.0f, 0.0f, 0.0f),
 				.up = glm::vec3(0.0f, 1.0f, 0.0f)
 			};
