@@ -28,9 +28,12 @@
 
 #include <glfw.hpp>
 #include <dt_timer.hpp>
+
 #include <imgui/imgui.h>
 #include <imgui/imgui_impl_glfw.h>
 #include <imgui/imgui_impl_opengl3.h>
+
+#include <implot/implot.h>
 
 #include <glm/ext.hpp>
 #include <glm/glm.hpp>
@@ -2365,10 +2368,13 @@ void main() {
 			ImGui_ImplGlfw_InitForOpenGL(window, true);
 			ImGui_ImplOpenGL3_Init(version.c_str());
 
+			ImPlot::CreateContext();
+
 			texture = get_ctx()->get_resource<texture_t>("color");
 		}
 
 		~imgui_system_t() {
+			ImPlot::DestroyContext();
 			ImGui_ImplOpenGL3_Shutdown();
 			ImGui_ImplGlfw_Shutdown();
 			ImGui::DestroyContext();
@@ -2379,6 +2385,52 @@ void main() {
 			if (texture) {
 				framebuffer_widget.render(texture->id, texture->width, texture->height);
 			}
+
+			ImGui::ShowDemoWindow();
+
+			if (ImGui::Begin("Level fun")) {
+				if (ImGui::TreeNodeEx("Suction", ImGuiTreeNodeFlags_Bullet)) {
+					static bool a_selected = false;
+					ImGui::OpenPopupOnItemClick("hello", ImGuiPopupFlags_MouseButtonRight);
+					if (ImGui::BeginPopup("hello")) {
+						ImGui::Checkbox("select all", &a_selected);
+						ImGui::EndPopup();
+					}
+
+					if (a_selected) {
+						ImGui::Text("Nigger");
+					}
+					
+					if (ImGui::TreeNodeEx("Counter", ImGuiTreeNodeFlags_Bullet)) {
+						static bool a_selected = false;
+						ImGui::OpenPopupOnItemClick("hello", ImGuiPopupFlags_MouseButtonRight);
+						if (ImGui::BeginPopup("hello")) {
+							ImGui::Checkbox("select all", &a_selected);
+							ImGui::EndPopup();
+						}
+
+						if (a_selected) {
+							ImGui::Text("Nigger");
+						}
+
+						ImGui::Text("unit1");
+						ImGui::Text("unit2");
+						ImGui::TreePop();
+					}
+
+					ImGui::TreePop();
+				}
+			}
+			ImGui::End();
+
+			ImGui::Begin("My Window");
+			if (ImPlot::BeginPlot("My Plot")) {
+				float x_data[] = {1, 2, 3, 4};
+				float y_data[] = {1, 2, 3, 4};
+				ImPlot::PlotLine("My Line Plot", x_data, y_data, 4);
+				ImPlot::EndPlot();
+			}
+			ImGui::End();
 		}
 
 	public:
@@ -2634,7 +2686,7 @@ void main() {
 			float_gen_t vel_gen(42, -30.0f, +30.0f);
 			rgb_color_gen_t color_gen(42);
 
-			int count = 200;
+			int count = 50;
 
 			ball_handles.clear();
 			for (int i = 0; i < count; i++) {
@@ -2816,10 +2868,10 @@ void main() {
 	class mainloop_t : public mainloop_if_t {
 	public:
 		mainloop_t(engine_ctx_t* _ctx) : ctx{_ctx} {
-			constexpr int window_width = 300;
-			constexpr int window_height = 300;
-			constexpr int tex_width = 280;
-			constexpr int tex_height = 280;
+			constexpr int window_width = 1280;
+			constexpr int window_height = 720;
+			constexpr int tex_width = 512;
+			constexpr int tex_height = 512;
 
 			physics_system_info_t physics_system_info{
 				.eps = 1e-6f,
@@ -2829,7 +2881,7 @@ void main() {
 				.velocity_limit = 200.0f,
 				.impact_cor = 0.8f,
 				.impact_v_loss = 0.99f,
-				.dt_split = 8,
+				.dt_split = 2,
 			};
 
 			window_system = std::make_shared<window_system_t>(ctx, window_width, window_height);
@@ -2903,7 +2955,7 @@ void main() {
 			auto& sync_transform_attractor = *sync_transform_attractor_system;
 			auto& timer = *timer_system;
 
-			float dt = 0.017f;
+			float dt = 0.005f;
 			while (!window.should_close()) {
 				window.swap_buffers();
 
