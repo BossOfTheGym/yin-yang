@@ -899,24 +899,22 @@ void main() {
 
 	using handle_pool_t = impl::handle_pool_t<handle_t, null_handle>;
 
-	namespace impl {
-		template<class tag_t>
-		struct type_id_base_t {
-			inline static std::size_t counter = 0;
-		};
+	template<class tag_t>
+	struct type_id_t {
+	private:
+		inline static std::size_t counter = 0;
 
-		template<class type_t, class tag_t>
-		struct type_id_t : private type_id_base_t<tag_t> {
-		public:
-			inline static const std::size_t value = type_id_base_t<tag_t>::counter++;
-		};
-	}
+	public:
+		template<class type_t>
+		static std::size_t get() {
+			static const std::size_t id = counter++;
+			return id;
+		}
 
-	template<class tag_t = void>
-	inline const std::size_t type_count = impl::type_id_base_t<std::remove_cv_t<tag_t>>::counter;
-
-	template<class type_t, class tag_t = void>
-	inline const std::size_t type_id = impl::type_id_t<std::remove_cv_t<type_t>, std::remove_cv_t<tag_t>>::value;
+		static std::size_t count() {
+			return counter;
+		}
+	};
 
 	template<class iter_t>
 	struct iter_helper_t {
@@ -934,11 +932,11 @@ void main() {
 	template<class if_t>
 	class if_storage_t {
 		template<class object_t>
-		inline static const std::size_t object_id = type_id<object_t, if_t>;
+		static std::size_t object_id() { return type_id_t<if_t>::template get<object_t>(); }
 
 		template<class object_t>
 		if_storage_t(std::shared_ptr<if_t> _if_ptr, object_t* _true_ptr)
-			: if_ptr{std::move(_if_ptr)}, true_ptr{_true_ptr}, id{object_id<object_t>} {}
+			: if_ptr{std::move(_if_ptr)}, true_ptr{_true_ptr}, id{object_id<object_t>()} {}
 
 	public:
 		template<class object_t, class ... args_t>
@@ -970,7 +968,7 @@ void main() {
 
 		template<class object_t>
 		auto* get() const {
-			assert(id == object_id<object_t>);
+			assert(id == object_id<object_t>());
 			return (object_t*)true_ptr;
 		}
 
@@ -995,7 +993,7 @@ void main() {
 		struct resource_tag_t;
 
 		template<class resource_t>
-		inline static const std::size_t resource_id = type_id<resource_t, resource_tag_t>;
+		static std::size_t resource_id() { return type_id_t<resource_tag_t>::template get<resource_t>(); }
 
 		class resource_entry_if_t {
 		public:
@@ -1038,11 +1036,12 @@ void main() {
 		auto& acquire_entry() {
 			using entry_t = resource_entry_t<resource_t>;
 
-			if (auto it = entries.find(resource_id<resource_t>); it != entries.end()) {
+			std::size_t res_id = resource_id<resource_t>();
+			if (auto it = entries.find(resource_id<resource_t>()); it != entries.end()) {
 				return *it->second.template get<entry_t>();
 			}
 
-			auto [it, inserted] = entries.insert({resource_id<resource_t>, resource_storage_t::create<entry_t>()});
+			auto [it, inserted] = entries.insert({resource_id<resource_t>(), resource_storage_t::create<entry_t>()});
 			return *it->second.template get<entry_t>();
 		}
 
@@ -1085,7 +1084,7 @@ void main() {
 		struct component_tag_t;
 
 		template<class component_t>
-		static inline const std::size_t component_id = type_id<component_t, component_tag_t>; 
+		static std::size_t component_id() { return type_id_t<component_tag_t>::template get<component_t>(); }
 
 		class component_entry_if_t {
 		public:
@@ -1169,11 +1168,11 @@ void main() {
 		auto& acquire_entry() {
 			using entry_t = component_entry_t<component_t>;
 			
-			if (auto it = entries.find(type_id<component_t>); it != entries.end()) {
+			if (auto it = entries.find(component_id<component_t>()); it != entries.end()) {
 				return *it->second.template get<entry_t>();
 			}
 
-			auto [it, inserted] = entries.insert({component_id<component_t>, component_storage_t::create<entry_t>()});
+			auto [it, inserted] = entries.insert({component_id<component_t>(), component_storage_t::create<entry_t>()});
 			return *it->second.template get<entry_t>();
 		}
 
@@ -2080,7 +2079,7 @@ void main() {
 	public:
 		void update(tick_t dt) {
 			for (auto& [handle, timer] : get_ctx()->iterate_components<timer_component_t>()) {
-				update_timer(timer, dt);
+				//update_timer(timer, dt);
 			}
 		}
 	};
