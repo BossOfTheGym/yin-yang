@@ -12,6 +12,7 @@
 #include <iomanip>
 #include <utility>
 #include <numeric>
+#include <cstdarg>
 #include <cstdint>
 #include <cstddef>
 #include <variant>
@@ -30,6 +31,7 @@
 #include <dt_timer.hpp>
 
 #include <imgui/imgui.h>
+#include <imgui/imgui_internal.h>
 #include <imgui/imgui_impl_glfw.h>
 #include <imgui/imgui_impl_opengl3.h>
 
@@ -54,85 +56,25 @@ namespace {
 		}
 	};
 
-	struct demo_widget_t {
-		void render() {
-			if (show) {
-				ImGui::ShowDemoWindow(&show);
-			}
+	void imgui_texture(ImTextureID id, const ImVec2& size) {
+		ImGuiWindow* window = ImGui::GetCurrentWindow();
+		if (window->SkipItems) {
+			return;
 		}
 
-		bool show{true};
-	};
+		float content_width = std::max(ImGui::GetContentRegionAvail().x, 1.0f);
+		float ratio = 1.0f;//std::min(content_width, size.x) / size.x;
+		float width = size.x * ratio;
+		float height = size.y * ratio;
 
-	static void help_marker(const char* desc) {
-		ImGui::TextDisabled("(?)");
-		if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
-			ImGui::BeginTooltip();
-			ImGui::PushTextWrapPos(ImGui::GetFontSize() * 35.0f);
-			ImGui::TextUnformatted(desc);
-			ImGui::PopTextWrapPos();
-			ImGui::EndTooltip();
-		}
+		window->DC.CursorPos.y += height;
+		ImGui::Image(id, ImVec2{width, -height});
 	}
 
-	struct sim_widget_t {
-		static constexpr ImGuiWindowFlags flags_init = ImGuiWindowFlags_NoDecoration
-			| ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings
-			| ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoScrollbar;
-
-		void render() {
-			if (!opened) {
-				return;
-			}
-
-			const ImGuiViewport* viewport = ImGui::GetMainViewport();
-			ImGui::SetNextWindowPos(use_work_area ? viewport->WorkPos : viewport->Pos);
-			ImGui::SetNextWindowSize(use_work_area ? viewport->WorkSize : viewport->Size);
-			if (ImGui::Begin("Test fullscreen", &opened, flags)) {
-				if (ImGui::BeginChild("Side pane", ImVec2(150, 0), true)) {
-					ImGui::Text("Mhhhh");
-					ImGui::Button("Noice");
-				} ImGui::EndChild();
-
-				ImGui::SameLine();
-
-				ImGui::BeginGroup();
-				if (ImGui::BeginChild("Framebuffer"), ImVec2(0, 0), true) {
-					ImGui::Text("Mhhhh");
-					ImGui::Button("Noice");
-				} ImGui::EndChild();
-				ImGui::EndGroup();
-			} ImGui::End();
-		}
-
-		ImGuiWindowFlags flags{flags_init};
-		bool use_work_area{true};
-		bool opened{true};
-	};
-
-	struct framebuffer_widget_t {
-		static constexpr ImGuiWindowFlags flags_init = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_AlwaysAutoResize;
-
-		void render(GLuint id, int width, int height) {
-			if (!opened) {
-				return;
-			}
-
-			ImGui::SetNextWindowPos(ImVec2(0, 0));
-			//ImGui::SetNextWindowSize(ImVec2(width + 10, height + 10));
-			if (ImGui::Begin("Framebuffer", &opened, flags)) {
-				// workaround to flip texture
-				ImVec2 pos = ImGui::GetCursorPos();
-				pos.x += 0;
-				pos.y += height;
-				ImGui::SetCursorPos(pos);
-				ImGui::Image(reinterpret_cast<ImTextureID>(id), ImVec2(width, -height));
-			} ImGui::End();
-		}
-
-		ImGuiWindowFlags flags{flags_init};
-		bool opened{true};
-	};
+	template<class T>
+	ImTextureID to_tex_id(T id) {
+		return (ImTextureID)(std::uintptr_t)id;
+	}
 
 	struct texture_t {
 		texture_t() = default;
@@ -367,7 +309,9 @@ namespace {
 		subdivided.reserve(total_vertices << (subdiv << 1)); // a << (b << 1) = a * 2 ^ (b * 2) = a * 4 ^ b
 		for (auto& face : icosahedron_faces) {
 			subdivided.push_back(face);
-		} for (int i = 0; i < subdiv; i++) {
+		}
+		
+		for (int i = 0; i < subdiv; i++) {
 			int current_subdiv = subdivided.size();
 			for (int j = 0; j < current_subdiv; j++) {
 				auto [v0, v1, v2] = subdivided[j];
@@ -491,7 +435,8 @@ namespace {
 		framebuffer_t& operator = (framebuffer_t&& another) noexcept {
 			if (this != &another) {
 				std::swap(id, another.id);
-			} return *this;
+			}
+			return *this;
 		}
 
 		void attach(const framebuffer_attachment_t& attachment) {
@@ -548,7 +493,8 @@ namespace {
 		shader_t& operator = (shader_t&& another) noexcept {
 			if (this != &another) {
 				std::swap(id, another.id);
-			} return *this;
+			}
+			return *this;
 		}
 
 		bool valid() const {
@@ -644,7 +590,9 @@ namespace {
 				name.resize(name_length); // cut unneccessary null-terminator
 
 				uniforms[name] = uniform_props_t::from_array(name, props);
-			} return uniforms;
+			}
+			
+			return uniforms;
 		}
 
 		template<class ... shader_t>
@@ -657,7 +605,9 @@ namespace {
 
 			if (program.linked()) {
 				program.uniforms = get_uniform_props_map(program.id);
-			} return program;
+			}
+			
+			return program;
 		}
 
 		shader_program_t() = default;
@@ -686,14 +636,18 @@ namespace {
 			if (auto it = uniforms.find(name); it != uniforms.end()) {
 				assert(it->second.type == GL_FLOAT);
 				glProgramUniform1f(id, it->second.location, value);
-			} return false;
+				return true;
+			}
+			return false;
 		}
 
 		bool set_int(const char* name, GLint value) const {
 			if (auto it = uniforms.find(name); it != uniforms.end()) {
 				assert(it->second.type == GL_INT);
 				glProgramUniform1i(id, it->second.location, value);
-			} return false;
+				return true;
+			}
+			return false;
 		}
 
 		bool set_mat3(const char* name, const glm::mat3& value) const {
@@ -701,7 +655,8 @@ namespace {
 				assert(it->second.type == GL_FLOAT_MAT3);
 				glProgramUniformMatrix3fv(id, it->second.location, 1, GL_FALSE, glm::value_ptr(value));
 				return true;
-			} return false;
+			}
+			return false;
 		}
 
 		bool set_mat4(const char* name, const glm::mat4& value) const {
@@ -709,7 +664,8 @@ namespace {
 				assert(it->second.type == GL_FLOAT_MAT4);
 				glProgramUniformMatrix4fv(id, it->second.location, 1, GL_FALSE, glm::value_ptr(value));
 				return true;
-			} return false;
+			}
+			return false;
 		}
 
 		bool set_vec3(const char* name, const glm::vec3& value) const {
@@ -717,7 +673,8 @@ namespace {
 				assert(it->second.type == GL_FLOAT_VEC3);
 				glProgramUniform3fv(id, it->second.location, 1, glm::value_ptr(value));
 				return true;
-			} return false;
+			}
+			return false;
 		}
 
 		bool set_vec4(const char* name, const glm::vec4& value) const {
@@ -725,7 +682,8 @@ namespace {
 				assert(it->second.type == GL_FLOAT_VEC4);
 				glProgramUniform4fv(id, it->second.location, 1, glm::value_ptr(value));
 				return true;
-			} return false;
+			}
+			return false;
 		}
 
 		bool valid() const {
@@ -835,7 +793,8 @@ void main() {
 		if (!program.linked()) {
 			out << "*** Failed to link program:\n" << program.get_info_log() << "\n";
 			program = shader_program_t{};
-		} return std::make_tuple(std::move(program), out.str());
+		}
+		return std::make_tuple(std::move(program), out.str());
 	}
 
 
@@ -879,7 +838,8 @@ void main() {
 			bool is_used(handle_t handle) const {
 				if (handle != null_handle && handle < handles.size()) {
 					return handles[handle] == handle;
-				} return false;
+				}
+				return false;
 			}
 
 			void clear() {
@@ -1107,24 +1067,28 @@ void main() {
 					if (auto [it, inserted] = components.emplace(std::piecewise_construct,
 						std::forward_as_tuple(handle), std::forward_as_tuple(std::forward<args_t>(args)...)); inserted) {
 						return &it->second;
-					} return nullptr;
+					}
+					return nullptr;
 				} else {
 					if (auto [it, inserted] = components.insert({handle, component_t{std::forward<args_t>(args)...}}); inserted) {
 						return &it->second;
-					} return nullptr;
+					}
+					return nullptr;
 				}
 			}
 
 			component_t* add(handle_t handle, const component_t& component) {
 				if (auto [it, inserted] = components.insert({handle, component}); inserted) {
 					return &it->second;
-				} return nullptr;
+				}
+				return nullptr;
 			}
 
 			component_t* add(handle_t handle, component_t&& component) {
 				if (auto [it, inserted] = components.insert({handle, std::move(component)}); inserted) {
 					return &it->second;
-				} return nullptr;
+				}
+				return nullptr;
 			}
 
 			virtual void remove(handle_t handle) override {
@@ -1134,13 +1098,15 @@ void main() {
 			component_t* get(handle_t handle) {
 				if (auto it = components.find(handle); it != components.end()) {
 					return &it->second;
-				} return nullptr;
+				}
+				return nullptr;
 			}
 
 			component_t* peek() {
 				if (!components.empty()) {
 					return &components.begin()->second;
-				} return nullptr;
+				}
+				return nullptr;
 			}
 
 			std::size_t count() const {
@@ -1302,7 +1268,8 @@ void main() {
 		system_t* get(const std::string& name) {
 			if (auto it = systems.find(name); it != systems.end()) {
 				return it->second.get<system_t>();
-			} return nullptr;
+			}
+			return nullptr;
 		}
 
 		void clear() {
@@ -1424,7 +1391,8 @@ void main() {
 			if (!is_alive(handle)) {
 				std::cerr << "trying to add component to invalid handle " << handle << std::endl;
 				return nullptr;
-			} return component_registry.emplace<component_t>(handle, std::forward<args_t>(args)...);
+			}
+			return component_registry.emplace<component_t>(handle, std::forward<args_t>(args)...);
 		}
 
 		template<class component_t>
@@ -1432,7 +1400,8 @@ void main() {
 			if (!is_alive(handle)) {
 				std::cerr << "trying to add component to invalid handle " << handle << std::endl;
 				return nullptr;
-			} return component_registry.add<component_t>(handle, component);
+			}
+			return component_registry.add<component_t>(handle, component);
 		}
 
 		template<class component_t>
@@ -1440,7 +1409,8 @@ void main() {
 			if (!is_alive(handle)) {
 				std::cerr << "trying to add component to invalid handle " << handle << std::endl;
 				return nullptr;
-			} return component_registry.add<component_t>(handle, std::move(component));
+			}
+			return component_registry.add<component_t>(handle, std::move(component));
 		}
 
 		template<class component_t>
@@ -1448,7 +1418,8 @@ void main() {
 			if (!is_alive(handle)) {
 				std::cerr << "trying to remove component using invalid handle " << handle << std::endl;
 				return;
-			} component_registry.remove<component_t>(handle);
+			}
+			component_registry.remove<component_t>(handle);
 		}
 
 		template<class component_t>
@@ -1456,7 +1427,8 @@ void main() {
 			if (!is_alive(handle)) {
 				std::cerr << "trying to get component using invalid handle " << handle << std::endl;
 				return nullptr;
-			} return component_registry.get<component_t>(handle);
+			}
+			return component_registry.get<component_t>(handle);
 		}
 
 		template<class component_t>
@@ -1496,14 +1468,16 @@ void main() {
 			if (!system_registry.add(name, std::move(sys))) {
 				std::cerr << "failed to add system " << std::quoted(name) << std::endl;
 				return false;
-			} return true;
+			}
+			return true;
 		}
 
 		bool remove_system(const std::string& name) {
 			if (!system_registry.remove(name)) {
 				std::cerr << "failed to remove system " << std::quoted(name) << std::endl;
 				return false;
-			} return true;
+			}
+			return true;
 		}
 
 		template<class system_t>
@@ -1651,13 +1625,15 @@ void main() {
 			if (this != &another) {
 				reset();
 				entity = another.entity.incref();
-			} return *this;
+			}
+			return *this;
 		}
 
 		shared_entity_t& operator = (shared_entity_t&& another) noexcept {
 			if (this != &another) {
 				std::swap(entity, another.entity);
-			} return *this;
+			}
+			return *this;
 		}
 
 		entity_t& get() {
@@ -1702,13 +1678,15 @@ void main() {
 			if (this != &another) {
 				reset();
 				entity = another.entity.incweakref();
-			} return *this;
+			}
+			return *this;
 		}
 
 		weak_entity_t& operator = (weak_entity_t&& another) noexcept {
 			if (this != &another) {
 				std::swap(entity, another.entity);
-			} return *this;
+			}
+			return *this;
 		}
 
 		entity_t& get() {
@@ -1804,140 +1782,15 @@ void main() {
 			for (auto& [handle, component] : get_ctx()->iterate_components<physics_t>()) {
 				index_to_handle.push_back(handle);
 				cached_components.push_back(&component);
-			} total_objects = index_to_handle.size();
-		}
-
-		struct impact_data_t {
-			glm::vec3 v1{}; float m1{};
-			glm::vec3 v2{}; float m2{};
-		};
-
-		struct impact_t {
-			glm::vec3 v{}; float m{};
-		};
-
-		glm::vec3 get_collision_axis(const physics_t& body1, const physics_t& body2) {
-			glm::vec3 n = body2.pos - body1.pos;
-			float n_len = glm::length(n);
-			if (n_len > eps) {
-				return n / n_len;
-			} return glm::vec3(0.0f);
-		}
-
-		std::optional<impact_data_t> resolve_impact(const physics_t& body1, const physics_t& body2) {
-			glm::vec3 n = get_collision_axis(body1, body2);
-			if (glm::dot(n, n) < eps) {
-				return std::nullopt;
 			}
-			// compute impulse change
-			glm::vec3 v1 = body1.vel;
-			glm::vec3 v2 = body2.vel;
-			glm::vec3 dv = v2 - v1;
-			float v1n = glm::dot(v1, n);
-			float v2n = glm::dot(v2, n);
-			float dvn = glm::dot(v2 - v1, n);
-			float m1 = body1.mass;
-			float m2 = body2.mass;
-			float m = m1 + m2;
-			float pn = m1 * v1n + m2 * v2n;
-			float new_v1n = (pn + impact_cor * m2 * dvn) / m;
-			float new_v2n = (pn - impact_cor * m1 * dvn) / m;
-			glm::vec3 new_v1 = new_v1n * n + impact_v_loss * (v1 - v1n * n);
-			glm::vec3 new_v2 = new_v2n * n + impact_v_loss * (v2 - v2n * n);
-			return impact_data_t{new_v1, m1, new_v2, m2};
-		}
-
-		// r - distance between objects
-		// r0 - radius (proj) of the first object
-		// r1 - radius (proj) of the second object 
-		// a - first point of overlap segment
-		// b - second point of overlap segment
-		struct overlap_t {
-			float r{}, r0{}, r1{}, a{}, b{};
-		};
-
-		std::optional<overlap_t> get_sphere_sphere_overlap(const glm::vec3& r0, float rad0, const glm::vec3& r1, float rad1, float eps) {
-			glm::vec3 dr = r1 - r0;
-			float rr = glm::dot(dr, dr);
-			if (rr - (rad0 + rad1) * (rad0 + rad1) > 0.0) {
-				return std::nullopt;
-			}
-			float r = std::sqrt(rr);
-			float a = std::max(-rad0, r - rad1);
-			float b = std::min(+rad0, r + rad1);
-			return overlap_t{r, rad0, rad1, a, b};
-		}
-
-		void resolve_overlaps() {
-			last_overlap.resize(total_objects);
-			for (auto& line : last_overlap) {
-				line.clear();
-				line.resize(total_objects, std::nullopt);
-			}
-			
-			for (int k = 0; k < overlap_resolution_iters; k++) {
-				for (int i = 0; i < total_objects; i++) {
-					auto& body_i = *cached_components[i];
-					for (int j = i + 1; j < total_objects; j++) {
-						auto& body_j = *cached_components[j];
-						
-						last_overlap[i][j] = get_sphere_sphere_overlap(body_i.pos, body_i.radius, body_j.pos, body_j.radius, eps);
-						if (!last_overlap[i][j]) {
-							continue;
-						} auto& overlap = *last_overlap[i][j];
-
-						float coef = 0.5f * overlap_coef * (overlap.b - overlap.a) / overlap.r;
-						glm::vec3 dr = coef * (body_i.pos - body_j.pos);
-
-						float ki = body_i.mass / (body_i.mass + body_j.mass);
-						float kj = body_j.mass / (body_i.mass + body_j.mass);
-						body_i.pos += ki * dr;
-						body_j.pos -= kj * dr;
-					}
-				}
-			}
-
-			impacts.resize(total_objects);
-			for (auto& line : impacts) {
-				line.clear();
-			}
-
-			for (int i = 0; i < total_objects; i++) {
-				auto& body_i = *cached_components[i];
-				for (int j = i + 1; j < total_objects; j++) {
-					auto& body_j = *cached_components[j];
-
-					if (!last_overlap[i][j]) {
-						continue;
-					}
-
-					if (auto impact = resolve_impact(body_i, body_j)) {
-						impacts[i].push_back({impact->v1, impact->m2});
-						impacts[j].push_back({impact->v2, impact->m1});
-					}
-				}
-			}
-
-			for (int i = 0; i < total_objects; i++) {
-				if (impacts[i].empty()) {
-					continue;
-				}
-				float m = 0.0f;
-				for (auto& data : impacts[i]) {
-					m += data.m;
-				}
-				glm::vec3 v = glm::vec3(0.0f);
-				for (auto& data : impacts[i]) {
-					v += data.v * (data.m / m);
-				}
-				cached_components[i]->vel = v;
-			}
+			total_objects = index_to_handle.size();
 		}
 
 		glm::vec3 limit_vec(const glm::vec3& vec, float max_len) const {
 			if (float len = glm::length(vec); len > max_len && len > eps) {
 				return vec * (max_len / len);
-			} return vec;
+			}
+			return vec;
 		}
 
 		glm::vec3 limit_movement(const glm::vec3& r0, const glm::vec3& r1, float max_len) const {
@@ -1953,13 +1806,16 @@ void main() {
 
 		glm::vec3 compute_force(const body_state_t& state) {
 			glm::vec3 acc{};
+
 			for (auto& [handle, attractor] : get_ctx()->iterate_components<attractor_t>()) {
 				glm::vec3 dr = attractor.pos - state.pos;
 				float dr_mag2 = glm::dot(dr, dr);
 				float dr_mag = std::sqrt(dr_mag2);
 				if (attractor.min_dist <= dr_mag && dr_mag <= attractor.max_dist) {
 					acc += attractor.gm / dr_mag2 * dr / dr_mag;
-				} if (attractor.drag_min_dist <= dr_mag && dr_mag <= attractor.drag_max_dist) {
+				}
+
+				if (attractor.drag_min_dist <= dr_mag && dr_mag <= attractor.drag_max_dist) {
 					float c0 = attractor.drag_min_coef;
 					float c1 = attractor.drag_max_coef;
 					float d0 = attractor.drag_min_dist;
@@ -1967,9 +1823,31 @@ void main() {
 					float coef = (1.0f - c1 + c0) * glm::smoothstep(d1, d0, dr_mag) + c0;
 					acc -= coef * state.vel;
 				}
-			} for (auto& [handle, force] : get_ctx()->iterate_components<force_t>()) {
+			}
+			
+			for (auto& [handle, force] : get_ctx()->iterate_components<force_t>()) {
 				acc += force.dir * force.mag;
-			} return acc;
+			}
+			
+			return acc;
+		}
+
+		glm::vec3 compute_obj2obj_force(int index) {
+			glm::vec3 acc{};
+			physics_t* physics = cached_components[index];
+			for (int i = 0; i < cached_components.size(); i++) {
+				if (i != index) {
+					physics_t* physics_i = cached_components[i];
+					glm::vec3 dr = physics->pos - physics_i->pos;
+					float r = glm::length(dr);
+					if (r <= 1e-6) {
+						continue;
+					}
+					float r0 = physics->radius + physics_i->radius;
+					acc += o2o * std::clamp(r0 - r, 0.0f, r0) * (dr / r);
+				}
+			}
+			return acc;
 		}
 
 		// simplification, compute acceleration beforehand
@@ -1987,23 +1865,17 @@ void main() {
 			integrator_updates.clear();
 			for (int i = 0; i < total_objects; i++) {
 				auto& physics = *cached_components[i];
+
 				auto state = body_state_t{physics.pos, physics.vel, physics.force, physics.mass};
 				state.force += compute_force(state);
+				state.force += compute_obj2obj_force(i);
+
 				auto new_state = integrate_motion(state, dt);
 				new_state.pos = limit_movement(state.pos, new_state.pos, movement_limit);
 				new_state.vel = limit_vec(new_state.vel, velocity_limit);
 				integrator_updates.push_back(new_state);
 			}
 		}
-
-		struct print_vec_t{
-			friend std::ostream& operator << (std::ostream& os, const print_vec_t& printer) {
-				return os << printer.label << printer.vec.x << " " << printer.vec.y << " " << printer.vec.z;
-			}
-
-			const char* label{};
-			const glm::vec3& vec;
-		};
 
 		void update_physics() {
 			for (int i = 0; i < total_objects; i++) {
@@ -2015,15 +1887,14 @@ void main() {
 
 				// TODO : move somewhere else
 				if (!physics.valid()) {
-					std::cout << "object " << i << " nan detected on frame " << frame << std::endl;
 					physics.pos = glm::vec3(0.0f);
 					physics.vel = glm::vec3(0.0f);
-				} if (glm::length(physics.pos) > 200.0f) {
+				}
+				
+				if (glm::length(physics.pos) > 200.0f) {
 					glm::vec3 dir = glm::normalize(physics.pos);
 					physics.pos -= 50.0f * dir;
 					physics.vel = -std::abs(glm::dot(physics.vel, dir)) * dir;
-					std::cout << "adjusting  object " << i << ": "
-						<< print_vec_t{"pos:", physics.pos} << " " << print_vec_t{"vel:", physics.vel} << std::endl;
 				}
 			}
 		}
@@ -2032,11 +1903,14 @@ void main() {
 		void update(float dt) {
 			cache_components();
 			for (int i = 0; i < dt_split; i++) {
-				resolve_overlaps();
 				get_integrator_updates(dt / dt_split);
 				update_physics();
-			} frame++;
+			}
+			frame++;
 		}
+
+		float get_o2o() const { return o2o; }
+		void set_o2o(float value) { o2o = value; }
 
 	private:
 		float eps{};
@@ -2051,14 +1925,13 @@ void main() {
 		float touch_coef_workaround{};
 		float impact_cor{};
 		float impact_v_loss{};
+		float o2o{4.0f};
 		int dt_split{};
 
 		int frame{};
 		std::size_t total_objects{};
 		std::vector<physics_t*> cached_components;
 		std::vector<handle_t> index_to_handle;
-		std::vector<std::vector<std::optional<overlap_t>>> last_overlap;
-		std::vector<std::vector<impact_t>> impacts;
 		std::vector<body_state_t> integrator_updates;
 	};
 
@@ -2260,11 +2133,14 @@ void main() {
 					glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
 					glClearColor(clear_color[0], clear_color[1], clear_color[2], clear_color[3]);
 					glClearDepth(clear_depth);
+					
 					if (depth_test) {
 						glEnable(GL_DEPTH_TEST);
 					} else {
 						glDisable(GL_DEPTH_TEST);
-					} if (cull_face) {
+					}
+					
+					if (cull_face) {
 						glEnable(GL_CULL_FACE);
 					} else {
 						glDisable(GL_CULL_FACE);
@@ -2361,16 +2237,15 @@ void main() {
 	// for now simplified
 	class imgui_system_t : public system_if_t {
 	public:
+		using gui_callback_t = std::function<bool()>;
+
 		imgui_system_t(engine_ctx_t* ctx, GLFWwindow* window, const std::string& version) : system_if_t(ctx) {
 			IMGUI_CHECKVERSION();
 			ImGui::CreateContext();
 			ImGui::StyleColorsDark();
 			ImGui_ImplGlfw_InitForOpenGL(window, true);
 			ImGui_ImplOpenGL3_Init(version.c_str());
-
 			ImPlot::CreateContext();
-
-			texture = get_ctx()->get_resource<texture_t>("color");
 		}
 
 		~imgui_system_t() {
@@ -2380,64 +2255,23 @@ void main() {
 			ImGui::DestroyContext();
 		}
 
-	private:
 		void do_gui() {
-			if (texture) {
-				framebuffer_widget.render(texture->id, texture->width, texture->height);
-			}
-
-			ImGui::ShowDemoWindow();
-
-			if (ImGui::Begin("Level fun")) {
-				if (ImGui::TreeNodeEx("Suction", ImGuiTreeNodeFlags_Bullet)) {
-					static bool a_selected = false;
-					ImGui::OpenPopupOnItemClick("hello", ImGuiPopupFlags_MouseButtonRight);
-					if (ImGui::BeginPopup("hello")) {
-						ImGui::Checkbox("select all", &a_selected);
-						ImGui::EndPopup();
+			int read_pos = 0;
+			int write_pos = 0;
+			int count = callbacks.size();
+			while (read_pos < count) {
+				if (callbacks[read_pos]()) {
+					if (read_pos != write_pos) {
+						callbacks[write_pos] = std::move(callbacks[read_pos]);
 					}
-
-					if (a_selected) {
-						ImGui::Text("Nigger");
-					}
-					
-					if (ImGui::TreeNodeEx("Counter", ImGuiTreeNodeFlags_Bullet)) {
-						static bool a_selected = false;
-						ImGui::OpenPopupOnItemClick("hello", ImGuiPopupFlags_MouseButtonRight);
-						if (ImGui::BeginPopup("hello")) {
-							ImGui::Checkbox("select all", &a_selected);
-							ImGui::EndPopup();
-						}
-
-						if (a_selected) {
-							ImGui::Text("Nigger");
-						}
-
-						ImGui::Text("unit1");
-						ImGui::Text("unit2");
-						ImGui::TreePop();
-					}
-
-					ImGui::TreePop();
+					++write_pos;
 				}
+				++read_pos;
 			}
-			ImGui::End();
-
-			ImGui::Begin("My Window");
-			if (ImPlot::BeginPlot("My Plot")) {
-				float x_data[] = {1, 2, 3, 4};
-				float y_data[] = {1, 2, 3, 4};
-				ImPlot::PlotLine("My Line Plot", x_data, y_data, 4);
-				ImPlot::EndPlot();
-			}
-			ImGui::End();
+			callbacks.resize(write_pos);
 		}
 
 	public:
-		void set_texture(resource_ptr_t<texture_t> value) {
-			texture = std::move(value);
-		}
-
 		void update() {
 			// TODO : save/restore utility
 			struct save_restore_render_state_t {
@@ -2453,11 +2287,14 @@ void main() {
 					glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
 					glClearColor(clear_color[0], clear_color[1], clear_color[2], clear_color[3]);
 					glClearDepth(clear_depth);
+
 					if (depth_test) {
 						glEnable(GL_DEPTH_TEST);
 					} else {
 						glDisable(GL_DEPTH_TEST);
-					} if (cull_face) {
+					}
+					
+					if (cull_face) {
 						glEnable(GL_CULL_FACE);
 					} else {
 						glDisable(GL_CULL_FACE);
@@ -2497,9 +2334,12 @@ void main() {
 			}
 		}
 
+		void register_callback(gui_callback_t callback) {
+			callbacks.push_back(std::move(callback));
+		}
+
 	private:
-		framebuffer_widget_t framebuffer_widget{};
-		resource_ptr_t<texture_t> texture{};
+		std::vector<gui_callback_t> callbacks{};
 	};
 
 
@@ -2562,7 +2402,8 @@ void main() {
 		rgb_color_gen_t(seed_t seed)
 			: r_gen(shuffle(seed    ), 0.0f, 1.0f)
 			, g_gen(shuffle(seed + 1), 0.0f, 1.0f)
-			, b_gen(shuffle(seed + 2), 0.0f, 1.0f) {}
+			, b_gen(shuffle(seed + 2), 0.0f, 1.0f
+			) {}
 
 		glm::vec3 gen() {
 			float r = r_gen.gen(), g = g_gen.gen(), b = b_gen.gen();
@@ -2575,18 +2416,15 @@ void main() {
 
 	class hsl_color_gen_t {
 	public:
-		hsl_color_gen_t(seed_t seed)
-			: h_gen(shuffle(seed    ), 0.0f, 360.0f)
-			, s_gen(shuffle(seed + 1), 0.0f, 1.0f)
-			, l_gen(shuffle(seed + 2), 0.0f, 1.0f) {}
+		hsl_color_gen_t(seed_t seed) : h_gen(shuffle(seed), 0.0f, 360.0f) {}
 
 		glm::vec3 gen() {
-			float h = h_gen.gen(), s = s_gen.gen(), l = l_gen.gen();
-			return glm::vec3(h, s, l);
+			float h = h_gen.gen();
+			return glm::vec3(h, 1.0f, 1.0f);
 		}
 
 	private:
-		float_gen_t h_gen, s_gen, l_gen;
+		float_gen_t h_gen;
 	};
 
 	// TODO : test
@@ -2607,7 +2445,9 @@ void main() {
 			case 3: rgb = glm::vec3(0, x, c); break;
 			case 4: rgb = glm::vec3(x, 0, c); break;
 			case 5: rgb = glm::vec3(c, 0, x); break;
-		} return rgb + glm::vec3(l - c * 0.5f);
+		}
+
+		return rgb + glm::vec3(l - c * 0.5f);
 	}
 
 	class hsl_to_rgb_color_gen_t : public hsl_color_gen_t {
@@ -2623,7 +2463,6 @@ void main() {
 
 	using hsv_color_gen_t = hsl_color_gen_t;
 
-	// TODO : test
 	glm::vec3 hsv_to_rgb(const glm::vec3& hsv) {
 		float h = hsv.x, s = hsv.y, v = hsv.z;
 
@@ -2641,7 +2480,9 @@ void main() {
 			case 3: rgb = glm::vec3(0, x, c); break;
 			case 4: rgb = glm::vec3(x, 0, c); break;
 			case 5: rgb = glm::vec3(c, 0, x); break;
-		} return rgb + glm::vec3(v - c);
+		}
+		
+		return rgb + glm::vec3(v - c);
 	}
 
 	class hsv_to_rgb_color_gen_t : public hsv_color_gen_t {
@@ -2655,15 +2496,95 @@ void main() {
 		}
 	};
 
+
 	struct level_system_info_t {
 		// TODO : whatever configuration
 	};
 
 	class level_system_t : public system_if_t {
-		void create_balls() {
+		void scatter_balls() {
+			auto* ctx = get_ctx();
+
+			float_gen_t coord_gen(42, -30.0f, +30.0f);
+			float_gen_t vel_gen(42, -1.0f, +1.0f);
+			for (auto handle : ball_handles) {
+				float rx = coord_gen.gen(), ry = coord_gen.gen(), rz = coord_gen.gen();
+				float vx = vel_gen.gen(), vy = vel_gen.gen(), vz = vel_gen.gen();
+
+				entity_t ball{ctx, handle};
+				auto* physics = ball.get_component<physics_t>();
+				physics->pos = glm::vec3{rx, ry, rz};
+				physics->vel = glm::vec3{vx, vy, vz};
+
+			}
+		}
+
+		inline static const glm::vec3 SPHERE_XYZ = glm::vec3(0.0f);
+		inline static const float SPHERE_R = 2.5f;
+
+		glm::vec3 __yin_yang(const glm::vec3& pos) {
+			glm::vec3 p = (pos - SPHERE_XYZ) / SPHERE_R;
+
+			if (p.z <= 0.0f) {
+				p.y = -p.y;
+			}
+
+			float x = p.x, y = p.y, z = p.z;
+			if (std::sqrt((x + 0.5f) * (x + 0.5f) + y * y) < 0.2f) {
+				return glm::vec3(1.0f);
+			}
+
+			if (std::sqrt((x - 0.5f) * (x - 0.5f) + y * y) < 0.2f) {
+				return glm::vec3(0.0f);
+			}
+
+			if (x < -1.0f) {
+				if (y < 0.0f) {
+					return glm::vec3(0.0f);
+				}
+				return glm::vec3(1.0f);
+			}
+
+			if (x <= 0.0f) {
+				if (std::sqrt(std::abs(0.5f * 0.5f - (x + 0.5f) * (x + 0.5f))) >= y) {
+					return glm::vec3(0.0f);
+				}
+				return glm::vec3(1.0f);
+			}
+
+			if (x <= 1.0f) {
+				if (-std::sqrt(std::abs(0.5f * 0.5f - (x - 0.5f) * (x - 0.5f))) >= y) {
+					return glm::vec3(0.0f);
+				}
+				return glm::vec3(1.0f);
+			}
+
+			if (y <= 0.0f) {
+				return glm::vec3(0.0f);
+			}
+			return glm::vec3(1.0f);
+		}
+
+		glm::vec3 yin_yang(glm::vec3 pos, float r) {
+			return __yin_yang(pos + glm::normalize(pos - SPHERE_XYZ) * r);
+		}
+
+		void do_yin_yang() {
+			auto* ctx = get_ctx();
+			for (auto handle : ball_handles) {
+				entity_t ball{ctx, handle};
+				auto* material = ball.get_component<basic_material_t>();
+				auto* physics = ball.get_component<physics_t>();
+				material->color = yin_yang(physics->pos, physics->radius);
+			}
+		}
+
+		void init_balls() {
+			float r = 0.25f;
+
 			transform_t transform = {
 				.base = glm::mat4(1.0f),
-				.scale = glm::vec3(1.0f),
+				.scale = glm::vec3(r),
 				.rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f),
 				.translation = glm::vec3(0.0f) 
 			};
@@ -2671,7 +2592,7 @@ void main() {
 				.pos = glm::vec3(0.0f, 0.0f, 0.0f),
 				.vel = glm::vec3(0.0f, 0.0f, 0.0f),
 				.mass = 1.0f,
-				.radius = 1.0f,
+				.radius = r,
 			};
 			basic_material_t material = {
 				.color = glm::vec3(1.0f, 1.0f, 1.0f),
@@ -2680,27 +2601,13 @@ void main() {
 				.vao = get_ctx()->get_resource_ref<vertex_array_t>("sphere")
 			};
 
-			float_gen_t mass_gen(42, 0.5f, 1.0f);
-			float_gen_t rad_gen(42, 0.3f, 1.0f);
-			float_gen_t coord_gen(42, -50.0f, +50.0f);
-			float_gen_t vel_gen(42, -30.0f, +30.0f);
-			rgb_color_gen_t color_gen(42);
+			hsv_to_rgb_color_gen_t color_gen(42);
 
-			int count = 50;
+			int count = 700;
 
 			ball_handles.clear();
 			for (int i = 0; i < count; i++) {
-				float rx = coord_gen.gen(), ry = coord_gen.gen(), rz = coord_gen.gen();
-				float vx = vel_gen.gen(), vy = vel_gen.gen(), vz = vel_gen.gen();
-				float radius = 0.5f;//rad_gen.gen();
-				float mass = 1.0f;//mass_gen.gen();
-
-				transform.scale = glm::vec3(radius);
-
-				physics.pos = glm::vec3(rx, ry, rz);
-				physics.vel = glm::vec3(vx, vy, vz);
-				physics.radius = radius;
-				physics.mass = mass;
+				transform.scale = glm::vec3(0.5f);
 
 				material.color = color_gen.gen();
 
@@ -2714,6 +2621,11 @@ void main() {
 			}
 		}
 
+		void create_balls() {
+			init_balls();
+			scatter_balls();
+		}
+
 		void create_attractors() {
 			transform_t transform = {
 				.base = glm::mat4(1.0f),
@@ -2721,20 +2633,22 @@ void main() {
 				.rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f),
 				.translation = glm::vec3(0.0f)
 			};
+
 			attractor_t attractor = {
 				.pos = glm::vec3(0.0f),
-				.gm = 1000.0f,
+				.gm = 400.0f,
 				.min_dist = 2.0f,
 				.max_dist = 200.0f,
-				.drag_min_coef = 0.2,
-				.drag_max_coef = 1.0f,
+				.drag_min_coef = 0.95f,
+				.drag_max_coef = 0.95f,
 				.drag_min_dist = 0.0f,
-				.drag_max_dist = 7.0f,
+				.drag_max_dist = SPHERE_R * 3.0f,
 			};
+
 			basic_material_t material = {
 				.color = glm::vec3(1.0f, 0.0f, 0.0f),
 				.specular_strength = 0.5f,
-				.shininess = 32.0f,
+				.shininess = 64.0f,
 				.vao = get_ctx()->get_resource_ref<vertex_array_t>("sphere")
 			};
 
@@ -2765,7 +2679,7 @@ void main() {
 				.fov = glm::radians(60.0f),
 				.near = 1.0f,
 				.far = 200.0f,
-				.eye = glm::vec3(20.0f, 0.0, 0.0),
+				.eye = glm::vec3(0.0f, 0.0, 13.0),
 				.center = glm::vec3(0.0f, 0.0f, 0.0f),
 				.up = glm::vec3(0.0f, 1.0f, 0.0f)
 			};
@@ -2824,6 +2738,45 @@ void main() {
 			create_imgui_pass();
 		}
 
+		bool framebuffer_gui() {
+			if (ImGui::Begin("level: framebuffer")) {
+				imgui_texture(to_tex_id(framebuffer_texture->id), ImVec2{(float)framebuffer_texture->width, (float)framebuffer_texture->height});
+			}
+			ImGui::End();
+			return true;
+		}
+
+		bool enable_yy{};
+
+		bool level_control_gui() {
+			if (ImGui::Begin("level: controls")) {
+				if (ImGui::Button("scatter")) {
+					scatter_balls();
+				}
+				ImGui::SameLine();
+				if (ImGui::Button("yin-yang")) {
+					do_yin_yang();
+				}
+				ImGui::Checkbox("enable yy", &enable_yy);
+			}
+			ImGui::End();
+			return true;
+		}
+
+		void create_shitty_gui() {
+			auto* ctx = get_ctx();
+			framebuffer_texture = ctx->get_resource<texture_t>("color");
+
+			if (auto* imgui_system = ctx->get_system<imgui_system_t>("imgui")) {
+				imgui_system->register_callback([&](){
+					return framebuffer_gui();
+				});
+				imgui_system->register_callback([&](){
+					return level_control_gui();
+				});
+			}
+		}
+
 	public:
 		level_system_t(engine_ctx_t* ctx) : system_if_t(ctx) {
 			create_balls();
@@ -2831,6 +2784,7 @@ void main() {
 			create_light();
 			create_viewer();
 			create_passes();
+			create_shitty_gui();
 		}
 
 		~level_system_t() {
@@ -2849,6 +2803,16 @@ void main() {
 			ctx->remove_resource<framebuffer_t>("default_frame");
 		}
 
+		void update() {
+			float t = glfw::get_time() * 0.4f;
+			entity_t viewer{get_ctx(), viewer_handle};
+			auto* camera = viewer.get_component<camera_t>();
+			camera->eye = glm::vec3(12.0f * std::cos(t), 0.0f, 12.0f * std::sin(t));
+			if (enable_yy) {
+				do_yin_yang();
+			}
+		}
+
 	private:
 		std::vector<handle_t> ball_handles;
 		handle_t attractor_handle{};
@@ -2856,6 +2820,8 @@ void main() {
 		handle_t viewer_handle{};
 		handle_t basic_pass_handle{};
 		handle_t imgui_pass_handle{};
+
+		resource_ptr_t<texture_t> framebuffer_texture{};
 	};
 
 	class mainloop_if_t {
@@ -2875,13 +2841,13 @@ void main() {
 
 			physics_system_info_t physics_system_info{
 				.eps = 1e-6f,
-				.overlap_coef = 0.4f,
-				.overlap_resolution_iters = 2,
-				.movement_limit = 200.0f,
-				.velocity_limit = 200.0f,
+				.overlap_coef = 1.0f,
+				.overlap_resolution_iters = 1,
+				.movement_limit = 300.0f,
+				.velocity_limit = 300.0f,
 				.impact_cor = 0.8f,
 				.impact_v_loss = 0.99f,
-				.dt_split = 2,
+				.dt_split = 20,
 			};
 
 			window_system = std::make_shared<window_system_t>(ctx, window_width, window_height);
@@ -2917,7 +2883,7 @@ void main() {
 			// but we can create system that will clear all dependent resources from engine_ctx
 			// it can be basic_resources_system here, for example
 			// many resources (like textures) depend on corresponding systems so this dependency management is something to be considered
-			// for now this is fine, we got a bunch of workarounds so it must work 
+			// for now this is fine, we got a bunch of workarounds so it must work
 			ctx->remove_system("level");
 			level_system.reset();
 
@@ -2954,8 +2920,21 @@ void main() {
 			auto& sync_transform_physics = *sync_transform_physics_system;
 			auto& sync_transform_attractor = *sync_transform_attractor_system;
 			auto& timer = *timer_system;
+			auto& level = *level_system;
 
-			float dt = 0.005f;
+			imgui_system->register_callback([&](){
+				if (ImGui::Begin("mainloop")) {
+					float o2o = physics_system->get_o2o();
+					ImGui::SetNextItemWidth(-1.0f);
+					if (ImGui::SliderFloat("##o2o", &o2o, 0.0f, 300.0f, "o2o %.2f")) {
+						physics_system->set_o2o(o2o);
+					}
+				}
+				ImGui::End();
+				return true;
+			});
+
+			float dt = 0.030f;
 			while (!window.should_close()) {
 				window.swap_buffers();
 
@@ -2967,6 +2946,7 @@ void main() {
 				sync_transform_attractor.update();
 				basic_renderer.update();
 				imgui.update();
+				level.update();
 			}
 		}
 
@@ -3020,7 +3000,12 @@ void main() {
 	// TODO : create second pass : apply light
 
 	// TODO : whatever TODO you see
+
+	// ...
+
+	// TODO : forget about this, it's done, time to move forward
 }
+
 
 int main() {
 	engine_t engine;
