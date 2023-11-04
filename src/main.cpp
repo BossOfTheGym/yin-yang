@@ -3,6 +3,7 @@
 #include <map>
 #include <set>
 #include <tuple>
+#include <deque>
 #include <cmath>
 #include <string>
 #include <memory>
@@ -268,11 +269,11 @@ namespace {
 			sphere_to_cartesian(glm::vec3(1.0, north_the, 3.0 * 2.0 * pi / 5.0)),
 			sphere_to_cartesian(glm::vec3(1.0, north_the, 4.0 * 2.0 * pi / 5.0)),
 
-			sphere_to_cartesian(glm::vec3(1.0, south_the, 0.0 * 2.0 * pi / 5.0 + 2.0 * pi / 10.0)),
-			sphere_to_cartesian(glm::vec3(1.0, south_the, 1.0 * 2.0 * pi / 5.0 + 2.0 * pi / 10.0)),
-			sphere_to_cartesian(glm::vec3(1.0, south_the, 2.0 * 2.0 * pi / 5.0 + 2.0 * pi / 10.0)),
-			sphere_to_cartesian(glm::vec3(1.0, south_the, 3.0 * 2.0 * pi / 5.0 + 2.0 * pi / 10.0)),
-			sphere_to_cartesian(glm::vec3(1.0, south_the, 4.0 * 2.0 * pi / 5.0 + 2.0 * pi / 10.0)),
+			sphere_to_cartesian(glm::vec3(1.0, south_the, 0.0 * 2.0 * pi / 5.0 + 1.0 * pi / 10.0)),
+			sphere_to_cartesian(glm::vec3(1.0, south_the, 1.0 * 2.0 * pi / 5.0 + 1.0 * pi / 10.0)),
+			sphere_to_cartesian(glm::vec3(1.0, south_the, 2.0 * 2.0 * pi / 5.0 + 1.0 * pi / 10.0)),
+			sphere_to_cartesian(glm::vec3(1.0, south_the, 3.0 * 2.0 * pi / 5.0 + 1.0 * pi / 10.0)),
+			sphere_to_cartesian(glm::vec3(1.0, south_the, 4.0 * 2.0 * pi / 5.0 + 1.0 * pi / 10.0)),
 			sphere_to_cartesian(glm::vec3(1.0, pi, 0.0)), // south pole
 		};
 
@@ -625,7 +626,8 @@ namespace {
 			if (this != &another) {
 				std::swap(id, another.id);
 				std::swap(uniforms, another.uniforms);
-			} return *this;
+			}
+			return *this;
 		}
 
 		void use() const {
@@ -733,6 +735,8 @@ void main() {
 	const inline std::string basic_frag_source =
 R"(
 #version 460 core
+#extension GL_ARB_gpu_shader_int64 : require
+
 layout(location = 0) out vec4 color;
 
 in vec3 world_pos;
@@ -757,22 +761,22 @@ void main() {
 	vec3 ambient = u_ambient_color;
 
 	vec3 light_ray = normalize(u_light_pos - world_pos);
-	float diffuse_coef = clamp(dot(light_ray, normal), 0.0, 1.0);
+	float diffuse_coef = max(dot(light_ray, normal), 0.0);
 	vec3 diffuse = diffuse_coef * u_light_color;
 
-	vec3 look_ray = normalize(u_eye_pos - world_pos);
-	vec3 light_reflected = reflect(-light_ray, normal);
-	float specular_coef = u_specular_strength * pow(clamp(dot(look_ray, light_reflected), 0.0, 1.0), u_shininess);
+	vec3 look_ray = u_eye_pos - world_pos;
+	float dist = length(look_ray);
+	look_ray /= dist;
+
+	vec3 spec_vec = normalize((look_ray + light_ray) * 0.5);
+	float specular_coef = u_specular_strength * pow(clamp(dot(normal, spec_vec), 0.0, 1.0), u_shininess);
 	vec3 specular = specular_coef * u_light_color;
 
-	float att_coef = 1.0;
-	if (diffuse_coef > 0.0) {
-		float d = length(u_light_pos - world_pos);
-		//att_coef = 1.0 / (1.0 + 0.1 * d + 0.1 * d * d);
-	}
+	uint64_t a = 0xdeadbeefdeadbeeful;
+	int b = int(a);
 
-	color = vec4((ambient + diffuse + specular) * object_color, 1.0);
-	color *= att_coef;
+	float att_coef = 1.0 / (0.1 + dist * dist);
+	color = vec4((ambient + 64.0 * (diffuse + specular) * att_coef) * object_color, 1.0);
 }
 )";
 
@@ -1283,7 +1287,9 @@ void main() {
 	// systems are allowed to own a resource, so they can call get_resource() (well, this can also be not good, but for now they are allowed)
 	// entities are not allowed to own any resource so they MUST call get_resource_ref()
 	// TODO : how to process null_handle ? (most probably, ignore). now null_handle is considered invalid
-	// TODO : releasing a handle during destruction causes crash
+	// TODO : releasing a handle during destruction causes crash (TODO : check, probably an old comment)
+	// TODO : get_all_components<component...> - returns tuple of pointers to the appropriate components if an entity has all components set
+	// TODO : get_some_components<component...> -  returns tuple of pointers to the appropriate components, some pointers can be null if component does not exist
 	class engine_ctx_t {
 	public:
 		~engine_ctx_t() {
@@ -1707,238 +1713,10 @@ void main() {
 	};
 
 
-	// point attractor
-	// a = GM / |r - r0|^2 * (r - r0) / |r - r0|
-	struct attractor_t {
-		glm::vec3 pos{};
-		float gm{};
-		float min_dist{};
-		float max_dist{};
-		float drag_min_coef{};
-		float drag_max_coef{};
-		float drag_min_dist{};
-		float drag_max_dist{};
-	};
-
-	// directional force
-	struct force_t {
-		glm::vec3 dir{};
-		float mag{};
-	};
-
-	struct physics_t {
-		bool valid() const {
-			return !(glm::any(glm::isnan(pos)) || glm::any(glm::isnan(vel)));
-		}
-
-		glm::vec3 pos{};
-		glm::vec3 vel{};
-		glm::vec3 force{};
-		float mass{};
-		float radius{};
-	};
-
-	struct physics_system_info_t {
-		float eps{};
-		float overlap_coef{};
-		float overlap_vel_coef{};
-		float overlap_thresh{};
-		float overlap_spring_coef{};
-		int overlap_resolution_iters{};
-		float movement_limit{};
-		float velocity_limit{};
-		float touch_thresh{};
-		float touch_coef_workaround{};
-		float impact_cor{};
-		float impact_v_loss{};
-		int dt_split{};
-	};
-
-	class physics_system_t : public system_if_t {
-	public:
-		static constexpr float no_collision = 2.0f;
-
-		physics_system_t(engine_ctx_t* ctx, const physics_system_info_t& info)
-			: system_if_t(ctx)
-			, eps{info.eps}
-			, overlap_coef{info.overlap_coef}
-			, overlap_vel_coef{info.overlap_vel_coef}
-			, overlap_thresh{info.overlap_thresh}
-			, overlap_spring_coef{info.overlap_spring_coef}
-			, overlap_resolution_iters{std::max(info.overlap_resolution_iters, 1)}
-			, movement_limit{info.movement_limit}
-			, velocity_limit{info.velocity_limit}
-			, touch_thresh{info.touch_thresh}
-			, touch_coef_workaround{info.touch_coef_workaround}
-			, impact_cor{info.impact_cor}
-			, impact_v_loss{info.impact_v_loss}
-			, dt_split{info.dt_split}
-		{}
-
-	private:
-		void cache_components() {
-			cached_components.clear();
-			index_to_handle.clear();
-			for (auto& [handle, component] : get_ctx()->iterate_components<physics_t>()) {
-				index_to_handle.push_back(handle);
-				cached_components.push_back(&component);
-			}
-			total_objects = index_to_handle.size();
-		}
-
-		glm::vec3 limit_vec(const glm::vec3& vec, float max_len) const {
-			if (float len = glm::length(vec); len > max_len && len > eps) {
-				return vec * (max_len / len);
-			}
-			return vec;
-		}
-
-		glm::vec3 limit_movement(const glm::vec3& r0, const glm::vec3& r1, float max_len) const {
-			return r0 + limit_vec(r1 - r0, max_len);
-		}
-
-		struct body_state_t {
-			glm::vec3 pos{};
-			glm::vec3 vel{};
-			glm::vec3 force{};
-			float mass{};
-		};
-
-		glm::vec3 compute_force(const body_state_t& state) {
-			glm::vec3 acc{};
-
-			for (auto& [handle, attractor] : get_ctx()->iterate_components<attractor_t>()) {
-				glm::vec3 dr = attractor.pos - state.pos;
-				float dr_mag2 = glm::dot(dr, dr);
-				float dr_mag = std::sqrt(dr_mag2);
-				if (attractor.min_dist <= dr_mag && dr_mag <= attractor.max_dist) {
-					acc += attractor.gm / dr_mag2 * dr / dr_mag;
-				}
-
-				if (attractor.drag_min_dist <= dr_mag && dr_mag <= attractor.drag_max_dist) {
-					float c0 = attractor.drag_min_coef;
-					float c1 = attractor.drag_max_coef;
-					float d0 = attractor.drag_min_dist;
-					float d1 = attractor.drag_max_dist;
-					float coef = (1.0f - c1 + c0) * glm::smoothstep(d1, d0, dr_mag) + c0;
-					acc -= coef * state.vel;
-				}
-			}
-			
-			for (auto& [handle, force] : get_ctx()->iterate_components<force_t>()) {
-				acc += force.dir * force.mag;
-			}
-			
-			return acc;
-		}
-
-		glm::vec3 compute_obj2obj_force(int index) {
-			glm::vec3 acc{};
-			physics_t* physics = cached_components[index];
-			for (int i = 0; i < cached_components.size(); i++) {
-				if (i != index) {
-					physics_t* physics_i = cached_components[i];
-					glm::vec3 dr = physics->pos - physics_i->pos;
-					float r = glm::length(dr);
-					if (r <= 1e-6) {
-						continue;
-					}
-					float r0 = physics->radius + physics_i->radius;
-					acc += o2o * std::clamp(r0 - r, 0.0f, r0) * (dr / r);
-				}
-			}
-			return acc;
-		}
-
-		// simplification, compute acceleration beforehand
-		// this method will update state considering it acceleration as const
-		body_state_t integrate_motion(const body_state_t& state, float dt) {
-			body_state_t new_state = state;
-			glm::vec3 acc = state.force / state.mass;
-			glm::vec3 vel_tmp = state.vel + 0.5f * acc * dt;
-			new_state.pos = state.pos + vel_tmp * dt;
-			new_state.vel = vel_tmp + 0.5f * acc * dt;
-			return new_state;
-		}
-
-		void get_integrator_updates(float dt) {
-			integrator_updates.clear();
-			for (int i = 0; i < total_objects; i++) {
-				auto& physics = *cached_components[i];
-
-				auto state = body_state_t{physics.pos, physics.vel, physics.force, physics.mass};
-				state.force += compute_force(state);
-				state.force += compute_obj2obj_force(i);
-
-				auto new_state = integrate_motion(state, dt);
-				new_state.pos = limit_movement(state.pos, new_state.pos, movement_limit);
-				new_state.vel = limit_vec(new_state.vel, velocity_limit);
-				integrator_updates.push_back(new_state);
-			}
-		}
-
-		void update_physics() {
-			for (int i = 0; i < total_objects; i++) {
-				auto& physics = *cached_components[i];
-				auto& updated = integrator_updates[i];
-				physics.pos = updated.pos;
-				physics.vel = updated.vel;
-				physics.force = glm::vec3(0.0f);
-
-				// TODO : move somewhere else
-				if (!physics.valid()) {
-					physics.pos = glm::vec3(0.0f);
-					physics.vel = glm::vec3(0.0f);
-				}
-				
-				if (glm::length(physics.pos) > 200.0f) {
-					glm::vec3 dir = glm::normalize(physics.pos);
-					physics.pos -= 50.0f * dir;
-					physics.vel = -std::abs(glm::dot(physics.vel, dir)) * dir;
-				}
-			}
-		}
-
-	public:
-		void update(float dt) {
-			cache_components();
-			for (int i = 0; i < dt_split; i++) {
-				get_integrator_updates(dt / dt_split);
-				update_physics();
-			}
-			frame++;
-		}
-
-		float get_o2o() const { return o2o; }
-		void set_o2o(float value) { o2o = value; }
-
-	private:
-		float eps{};
-		float overlap_coef{};
-		float overlap_vel_coef{};
-		float overlap_thresh{};
-		float overlap_spring_coef{};
-		int overlap_resolution_iters{};
-		float movement_limit{};
-		float velocity_limit{};
-		float touch_thresh{};
-		float touch_coef_workaround{};
-		float impact_cor{};
-		float impact_v_loss{};
-		float o2o{4.0f};
-		int dt_split{};
-
-		int frame{};
-		std::size_t total_objects{};
-		std::vector<physics_t*> cached_components;
-		std::vector<handle_t> index_to_handle;
-		std::vector<body_state_t> integrator_updates;
-	};
-
-
 	using tick_t = float;
 	using timer_component_t = dt_timer_t<tick_t>;
 
+	// TODO : implement
 	class timer_system_t : public system_if_t {
 	public:
 		timer_system_t(engine_ctx_t* ctx) : system_if_t(ctx) {}
@@ -1976,57 +1754,30 @@ void main() {
 	};
 
 
-	struct sync_transform_physics_t {};
+	using sync_callback_t = std::function<void(entity_t entity)>;
 
-	class sync_transform_physics_system_t : public system_if_t {
+	struct sync_component_t {
+		void operator() (entity_t entity) {
+			if (callback) {
+				callback(entity);
+			}
+		}
+
+		sync_callback_t callback{};
+	};
+
+	class sync_component_system_t : public system_if_t {
 	public:
-		sync_transform_physics_system_t(engine_ctx_t* ctx) : system_if_t(ctx) {}
+		sync_component_system_t(engine_ctx_t* ctx) : system_if_t(ctx) {}
 
 		void update() {
-			for (auto& [handle, sync] : get_ctx()->iterate_components<sync_transform_physics_t>()) {
-				auto* transform = get_ctx()->get_component<transform_t>(handle);
-				if (!transform) {
-					std::cerr << "missing transform component. handle " << handle << std::endl;
-					continue;
-				}
-
-				auto* physics = get_ctx()->get_component<physics_t>(handle);
-				if (!physics) {
-					std::cerr << "missing physics component. handle " << handle << std::endl;
-					continue;
-				}
-
-				transform->translation = physics->pos;
+			auto* ctx = get_ctx();
+			for (auto& [handle, sync] : ctx->iterate_components<sync_component_t>()) {
+				sync(entity_t{ctx, handle});
 			}
 		}
 	};
-
-
-	struct sync_transform_attractor_t {};
-
-	class sync_transform_attractor_system_t : public system_if_t {
-	public:
-		sync_transform_attractor_system_t(engine_ctx_t* ctx) : system_if_t(ctx) {}
-
-		void update() {
-			for (auto& [handle, sync] : get_ctx()->iterate_components<sync_transform_attractor_t>()) {
-				auto* transform = get_ctx()->get_component<transform_t>(handle);
-				if (!transform) {
-					std::cerr << "missing transform component. handle " << handle << std::endl;
-					continue;
-				}
-
-				auto* attractor = get_ctx()->get_component<attractor_t>(handle);
-				if (!attractor) {
-					std::cerr << "missing attractor component. handle " << handle << std::endl;
-					continue;
-				}
-
-				transform->translation = attractor->pos;
-			}
-		}
-	};
-
+	
 
 	class basic_resources_system_t : public system_if_t {
 	public:
@@ -2036,11 +1787,12 @@ void main() {
 					if (!program.valid()) {
 						std::cerr << info_log << std::endl;
 						return std::make_shared<shader_program_t>();
-					} return std::make_shared<shader_program_t>(std::move(program));
+					}
+					return std::make_shared<shader_program_t>(std::move(program));
 				}
 			)();
 
-			auto sphere_mesh_ptr = std::make_shared<mesh_t>(gen_sphere_mesh(1));
+			auto sphere_mesh_ptr = std::make_shared<mesh_t>(gen_sphere_mesh(5));
 			auto sphere_vao_ptr = std::make_shared<vertex_array_t>(gen_vertex_array_from_mesh(*sphere_mesh_ptr));
 			auto color = std::make_shared<texture_t>(gen_empty_texture(tex_width, tex_height, Rgba32f));
 			auto depth = std::make_shared<texture_t>(gen_depth_texture(tex_width, tex_height, Depth32f));
@@ -2180,26 +1932,30 @@ void main() {
 
 			GLuint prev_vao{};
 			for (auto& [handle, material] : get_ctx()->iterate_components<basic_material_t>()) {
+				continue;
+
 				auto* transform = get_ctx()->get_component<transform_t>(handle);
 				if (!transform) {
 					std::cerr << "missing transform component. handle: " << handle << std::endl;
 					continue;
 				}
 
-				if (auto vao = material.vao.lock()) {
-					if (vao->id != prev_vao) {
-						vao->bind();
-						prev_vao = vao->id;
-					}
-					program->set_mat4("u_m", transform->to_mat4());
-					program->set_vec3("u_object_color", material.color);
-					program->set_float("u_shininess", material.shininess);
-					program->set_float("u_specular_strength", material.specular_strength);
-					glDrawArrays(vao->mode, 0, vao->count);
-				} else {
+				auto vao = material.vao.lock();
+				if (!vao) {
 					std::cerr << "vao expired" << std::endl;
 					continue;
 				}
+
+				if (vao->id != prev_vao) {
+					vao->bind();
+					prev_vao = vao->id;
+				}
+
+				program->set_mat4("u_m", transform->to_mat4());
+				program->set_vec3("u_object_color", material.color);
+				program->set_float("u_shininess", material.shininess);
+				program->set_float("u_specular_strength", material.specular_strength);
+				glDrawArrays(vao->mode, 0, vao->count);
 			}
 		}
 
@@ -2246,6 +2002,11 @@ void main() {
 			ImGui_ImplGlfw_InitForOpenGL(window, true);
 			ImGui_ImplOpenGL3_Init(version.c_str());
 			ImPlot::CreateContext();
+
+			register_callback([&] () {
+				ImGui::ShowDemoWindow();
+				return true;
+			});
 		}
 
 		~imgui_system_t() {
@@ -2352,6 +2113,16 @@ void main() {
 			);
 			window->make_ctx_current();
 			glew_guard = std::make_unique<glew_guard_t>();
+
+			if (GLEW_ARB_gpu_shader_int64) {
+				if (glewGetExtension("GL_ARB_gpu_shader_int64")) {
+					std::cout << "we got 'GL_ARB_gpu_shader_int64'!\n";
+				} else {
+					std::cerr << "We failed to get 'GL_ARB_gpu_shader_int64'";
+				}
+			} else {
+				std::cerr << "shit...\n";
+			}
 		}
 
 		glfw::window_t& get_window() {
@@ -2362,6 +2133,646 @@ void main() {
 		std::unique_ptr<glfw::guard_t> glfw_guard;
 		std::unique_ptr<glfw::window_t> window;
 		std::unique_ptr<glew_guard_t> glew_guard;
+	};
+
+
+	// TODO : octotree
+	// TODO : multithreaded update
+	struct aabb_t {
+		glm::vec3 min{};
+		glm::vec3 max{};
+	};
+
+	struct sphere_t {
+		glm::vec3 center{};
+		float radius{};
+	};
+
+	bool test_intersection_aabb_aphere(const aabb_t& aabb, const sphere_t& sphere) {
+		glm::vec3 dr = sphere.center - glm::clamp(sphere.center, aabb.min, aabb.max);
+		return dr.x * dr.x + dr.y * dr.y + dr.z * dr.z <= sphere.radius * sphere.radius;
+	}
+
+	bool test_intersection_aabb_aabb(const aabb_t& aabb1, const aabb_t& aabb2) {
+		return glm::all(glm::lessThanEqual(aabb1.min, aabb2.max) && glm::lessThanEqual(aabb2.min, aabb1.max));
+	}
+
+	bool test_intersection_aabb_point(const aabb_t& aabb, const glm::vec3& point) {
+		return glm::all(glm::lessThanEqual(aabb.min, point) && glm::lessThanEqual(point, aabb.max));
+	}
+
+
+	using sparse_cell_t = glm::ivec3;
+
+	struct sparse_cell_hasher_t {
+		std::uint32_t operator() (const sparse_cell_t& cell) const {
+			constexpr std::uint32_t a = 0xFFFFFABD;
+			constexpr std::uint32_t b = 0xFFFFF78B;
+			return (((std::uint32_t)cell.x * a + (std::uint32_t)cell.y) * a + (std::uint32_t)cell.z) * a + b;
+		}
+	};
+
+	struct uint32_hasher_t {
+		std::uint32_t operator() (std::uint32_t value) const {
+			return value; // TODO
+		}
+	};
+
+	// cell_scale = 1.0f / cell_size
+	sparse_cell_t get_sparse_cell(const glm::vec3& point, float cell_scale, float cell_min, float cell_max) {
+		return glm::clamp(glm::floor(point * cell_scale), glm::vec3{cell_min}, glm::vec3{cell_max});
+	}
+
+	template<class data_t>
+	using sparse_cell_storage_t = std::unordered_map<sparse_cell_t, data_t, sparse_cell_hasher_t>;
+
+	using sparse_cell_set_t = std::unordered_set<sparse_cell_t, sparse_cell_hasher_t>;
+
+	struct sparse_query_result_t {
+		bool valid() const {
+			return head != -1;
+		}
+
+		sparse_cell_t cell{};
+		int head{};
+		int count{};
+	};
+
+	static constexpr sparse_query_result_t bad_sparse_query = sparse_query_result_t{sparse_cell_t{}, -1, 0};
+
+	template<class __data_t>
+	struct sparse_grid_t {
+		using data_t = __data_t;
+
+		struct data_entry_t {
+			int next = -1; // index of the next entry in data_storage
+			data_t data{};
+		};
+
+		struct storage_entry_t {
+			int head = -1; // first index in data_entries
+			int count = 0; // count of data_entries
+		};
+
+		using cell_storage_t = sparse_cell_storage_t<storage_entry_t>;
+		using cell_storage_iterator_t = typename cell_storage_t::iterator;
+
+		using data_storage_t = std::vector<data_entry_t>;
+		using data_storage_iterator_t = typename data_storage_t::iterator;
+
+		sparse_grid_t(float _cell_size, float _cell_min, float _cell_max)
+			: cell_scale{1.0f / _cell_size}
+			, cell_min{_cell_min}
+			, cell_max{_cell_max}
+		{}
+
+		template<class _data_t>
+		void add(const glm::vec3& point, _data_t&& data) {
+			auto [it, _] = cell_storage.insert({get_sparse_cell(point, cell_scale, cell_min, cell_max), storage_entry_t{-1, 0}});
+			auto& storage_entry = it->second;
+			data_storage.emplace_back(storage_entry.head, std::forward<_data_t>(data));
+			storage_entry.head = (int)data_storage.size() - 1;
+			storage_entry.count++;
+		}
+
+		void clear() {
+			cell_storage.clear();
+			data_storage.clear();
+		}
+
+		sparse_query_result_t find_cell(const sparse_cell_t& cell) const {
+			if (auto it = cell_storage.find(cell); it != cell_storage.end()) {
+				return sparse_query_result_t{it->first, it->second.head, it->second.count};
+			}
+			return bad_sparse_query;
+		}
+
+		// search checking all cells
+		void query_linear(const sparse_cell_t& min, const sparse_cell_t& max, std::vector<sparse_query_result_t>& result) const {
+			for (auto& [cell, entry] : cell_storage) {
+				if (min.x <= cell.x && cell.x <= max.x &&
+					min.y <= cell.y && cell.y <= max.y &&
+					min.z <= cell.z && cell.z <= max.z) {
+					result.push_back(sparse_query_result_t{cell, entry.head, entry.count});
+				}
+			}
+		}
+
+		void query_linear(const glm::vec3& min, const glm::vec3& max, std::vector<sparse_query_result_t>& result) const {
+			auto cell0 = get_sparse_cell(min, cell_scale, cell_min, cell_max);
+			auto cell1 = get_sparse_cell(max, cell_scale, cell_min, cell_max);
+			query_linear(cell0, cell1, result);
+		}
+
+		// search from subspace
+		void query(const sparse_cell_t& min, const sparse_cell_t& max, std::vector<sparse_query_result_t>& result) const {
+			auto count = max - min + sparse_cell_t{1};
+			for (int i = 0; i < count.x; i++) {
+				for (int j = 0; j < count.y; j++) {
+					for (int k = 0; k < count.z; k++) {
+						auto cell = min + sparse_cell_t{i, j, k};
+						if (auto query_result = find_cell(cell); query_result.valid()) {
+							result.push_back(query_result);
+						}
+					}
+				}
+			}
+		}
+
+		void query(const glm::vec3& min, const glm::vec3& max, std::vector<sparse_query_result_t>& result) const {
+			auto cell0 = get_sparse_cell(min, cell_scale, cell_min, cell_max);
+			auto cell1 = get_sparse_cell(max, cell_scale, cell_min, cell_max);
+			query(cell0, cell1, result);
+		}
+
+		const cell_storage_t& get_cell_storage() const {
+			return cell_storage;
+		}
+
+		data_entry_t& get_data_entry(int index) {
+			return data_storage[index];
+		}
+
+		const data_entry_t& get_data_entry(int index) const {
+			return data_storage[index];
+		}
+
+		cell_storage_t cell_storage;
+		data_storage_t data_storage;
+		float cell_scale{};
+		float cell_min{};
+		float cell_max{};
+	};
+
+	template<class _sparse_grid_t>
+	struct sparse_data_iterator_t {
+		template<class __sparse_grid_t>
+		sparse_data_iterator_t(__sparse_grid_t& _grid, int _head)
+			: grid{&_grid}
+			, head{_head}
+		{}
+
+		bool valid() const {
+			return head != -1;
+		}
+
+		auto& get() {
+			return grid->get_data_entry(head);
+		}
+
+		void next() {
+			head = get().next;
+		}
+
+		_sparse_grid_t* grid;
+		int head;
+	};
+
+	template<class __sparse_grid_t>
+	sparse_data_iterator_t(__sparse_grid_t&, int) -> sparse_data_iterator_t<__sparse_grid_t>;
+
+
+	// TODO : fuck... me...
+	template<class __data_t>
+	struct hierarchical_sparse_grid_t {
+		using data_t = __data_t;
+
+		hierarchical_sparse_grid_t(float cell_size0, float cell_min0, float cell_max0) {}
+	};
+
+
+	template<class data_t, class hasher_t, class equals_t>
+	struct lofi_hashtable_t {
+		static int nextlog2(int n) {
+			int power = 0;
+			int next = 1;
+			while (next < n) {
+				next <<= 1;
+				power++;
+			}
+			return power;
+		}
+
+		static int nextpow2(int) {
+			int next = 1;
+			while (next < n) {
+				next <<= 1;
+			}
+			return next;
+		}
+
+		static int log2size(int n) {
+			return 1 << n;
+		}
+
+		lofi_hashtable_t(const lofi_hashtable_t&) = delete;
+		lofi_hashtable_t& operator= (const lofi_hashtable_t&) = delete;
+		lofi_hashtable_t(lofi_hashtable_t&&) noexcept = delete;
+		lofi_hashtable_t& operator= (lofi_hashtable_t&&) noexcept = delete;
+
+		template<class _hasher_t, class _equals_t>
+		lofi_hashtable_t(int _max_size, _hasher_t&& _hasher, _equals_t&& _equals)
+			: hasher{std::forward<_hasher_t>(_hasher)}
+			, equals{std::forward<_equals_t>(_equals)>}
+			, max_capacity{nextpow2(_max_size)}
+		{
+			buckets = std::make_unique<bucket_t[]>(max_capacity * 2));
+			used_buckets = std::make_unique<int[]>(max_capacity);
+			data_entries = std::make_unique<data_entry_t[]>(max_capacity);
+		}
+
+		// stage 0: called from master-thread
+		void reset_size(int new_object_count) {
+			object_count = std::min(max_capacity, new_object_count);
+			capacity = std::min(max_capacity, nextpow2(new_object_count));
+			capacity_log2 = std::countr_zero(capacity);
+
+			used_buckets_count.store(0, std::memory_order_relaxed);
+			data_compacted_size.store(0, std::memory_order_relaxed);
+		}
+
+		// stage 1: can be called from multiple threads if they dont process the same data
+		void prepare_data(const data_t& data, int index) {
+			auto& entry = data_entries[index];
+			entry.next = index; // loop on self
+			entry.data = data;
+		}
+
+		// stage 1: can be called from multiple threads if they dont process the same data
+		void prepare_bucket(int index) {
+			auto& bucket = buckets[index];
+			bucket.head.store(-1, std::memory_order_relaxed);
+			bucket.count.store(0, std::memory_order_relaxed);
+		}
+
+		// stage 2: can be called from multiple threads if they dont process the same data
+		void put(int data_index) {
+			auto& data_entry = data_entries[data_index];
+			int bucket_index = get_bucket_index(hasher(data_entry.data));
+			while (true) {
+				auto& bucket = buckets[bucket_index];
+
+				int head = bucket.head.load(std::memory_order_relaxed);
+				if (head == -1 && bucket.head.compare_exchange_strong(head, data_index, std::memory_order_seq_cst)) {
+					used_buckets[used_buckets_count.fetch_add(1, std::memory_order_relaxed)] = bucket_index;
+					bucket.count.fetch_add(1, std::memory_order_relaxed);
+					break;
+				}
+				if (equals(data_entries[head].data, data_entry)) { // totaly legit to use possibly invalid head here
+					data_entry.next = bucket.head.exchange(data_index, std::memory_order_seq_cst); // head can be invalid
+					bucket.count.fetch_add(1, std::memory_order_relaxed);
+					break;
+				}
+
+				bucket_index = (bucket_index + 1) & (capacity - 1);
+			}
+		}
+
+		// stage 3: process and enjoy
+		const bucket_t& get_bucket(int index) const {
+			return buckets[used_buckets[index]];
+		}
+
+		const bucket_t& get(const data_t& data) const {
+			return buckets[get_bucket_index(hasher(data))];
+		}
+
+		int get_used_buckets_count() const {
+			return used_buckets_count.load(std::memory_order_relaxed);
+		}
+
+
+		int get_bucket_index(std::uint32_t hash) const {
+			return ((hash >> capacity_log2) + hash) & (capacity - 1); // add upper bits to lower
+		}
+
+		int get_buckets_size() const {
+			return capacity * 2;
+		}
+
+		int get_data_entries_size() const {
+			return object_count;
+		}
+
+
+		struct bucket_t {
+			std::atomic<int> head{}; // default : -1
+			std::atomic<int> count{}; // default : 0
+		};
+
+		struct data_entry_t {
+			int next{};
+			data_t data{};
+		};
+
+		hasher_t hasher;
+		equals_t equals;
+		const int max_capacity;
+
+		std::unique_ptr<bucket_t[]> buckets; // resized to capacity * 2 (increased capacity to decrease contention)
+
+		std::unique_ptr<int[]> used_buckets; // size = object_count
+		std::atomic<int> used_buckets_count{};
+
+		std::unique_ptr<data_entry_t[]> data_entries; // size = object_count
+	
+		int object_count{};
+		int capacity{};
+		int capacity_log2{};
+	};
+
+
+	// TODO : lofi_stack_t
+
+	// TODO : lofi_heavy_cell_iter_t
+
+	// point attractor
+	// a = GM / |r - r0|^2 * (r - r0) / |r - r0|
+	struct attractor_t {
+		glm::vec3 pos{};
+		float gm{};
+		float min_dist{};
+		float max_dist{};
+		float drag_min_coef{};
+		float drag_max_coef{};
+		float drag_min_dist{};
+		float drag_max_dist{};
+	};
+
+	// directional force
+	struct force_t {
+		glm::vec3 dir{};
+		float mag{};
+	};
+
+	struct physics_t {
+		bool valid() const {
+			return !(glm::any(glm::isnan(pos)) || glm::any(glm::isnan(vel)));
+		}
+
+		glm::vec3 pos{};
+		glm::vec3 vel{};
+		glm::vec3 force{};
+		float mass{};
+		float radius{};
+		bool no_update{};
+	};
+
+	struct physics_system_info_t {
+		float eps{};
+		float overlap_coef{};
+		float overlap_vel_coef{};
+		float overlap_thresh{};
+		float overlap_spring_coef{};
+		int overlap_resolution_iters{};
+		float movement_limit{};
+		float velocity_limit{};
+		float touch_thresh{};
+		float touch_coef_workaround{};
+		float impact_cor{};
+		float impact_v_loss{};
+		float o2o{};
+		int dt_split{};
+	};
+
+	class physics_system_t : public system_if_t {
+	public:
+		static constexpr float no_collision = 2.0f;
+
+		physics_system_t(engine_ctx_t* ctx, const physics_system_info_t& info)
+			: system_if_t(ctx)
+			, eps{info.eps}
+			, overlap_coef{info.overlap_coef}
+			, overlap_vel_coef{info.overlap_vel_coef}
+			, overlap_thresh{info.overlap_thresh}
+			, overlap_spring_coef{info.overlap_spring_coef}
+			, overlap_resolution_iters{std::max(info.overlap_resolution_iters, 1)}
+			, movement_limit{info.movement_limit}
+			, velocity_limit{info.velocity_limit}
+			, touch_thresh{info.touch_thresh}
+			, touch_coef_workaround{info.touch_coef_workaround}
+			, impact_cor{info.impact_cor}
+			, impact_v_loss{info.impact_v_loss}
+			, o2o{info.o2o}
+			, dt_split{info.dt_split}
+			, grid{0.5f, -1000000.0, 1000000.0}
+		{
+			auto* imgui_system = ctx->get_system<imgui_system_t>("imgui");
+
+			imgui_system->register_callback([&] (){
+				if (ImGui::Begin("physics")) {
+					ImGui::SetNextItemWidth(-1.0f);
+					if (ImGui::SliderFloat("##o2o", &o2o, 0.0f, 500.0f, "o2o %.2f")) {
+						set_o2o(o2o);
+					}
+				}
+				ImGui::End();
+				return true;
+			});
+		}
+
+	private:
+		void cache_components() {
+			cached_components.clear();
+			index_to_handle.clear();
+			for (auto& [handle, component] : get_ctx()->iterate_components<physics_t>()) {
+				index_to_handle.push_back(handle);
+				cached_components.push_back(&component);
+			}
+			total_objects = index_to_handle.size();
+		}
+
+		void initialize_grid() {
+			grid.clear();
+
+			int count = cached_components.size();
+			for (int i = 0; i < count; i++) {
+				auto* component = cached_components[i];
+				grid.add(component->pos, i);
+			}
+		}
+
+		glm::vec3 limit_vec(const glm::vec3& vec, float max_len) const {
+			if (float len = glm::length(vec); len > max_len && len > eps) {
+				return vec * (max_len / len);
+			}
+			return vec;
+		}
+
+		glm::vec3 limit_movement(const glm::vec3& r0, const glm::vec3& r1, float max_len) const {
+			return r0 + limit_vec(r1 - r0, max_len);
+		}
+
+		struct body_state_t {
+			glm::vec3 pos{};
+			glm::vec3 vel{};
+			glm::vec3 force{};
+			float mass{};
+		};
+
+		glm::vec3 compute_force(const body_state_t& state) {
+			glm::vec3 acc{};
+
+			for (auto& [handle, attractor] : get_ctx()->iterate_components<attractor_t>()) {
+				glm::vec3 dr = attractor.pos - state.pos;
+				float dr_mag2 = glm::dot(dr, dr);
+				float dr_mag = std::sqrt(dr_mag2);
+				if (attractor.min_dist <= dr_mag && dr_mag <= attractor.max_dist) {
+					acc += attractor.gm / dr_mag2 * dr / dr_mag;
+				}
+
+				if (attractor.drag_min_dist <= dr_mag && dr_mag <= attractor.drag_max_dist) {
+					float c0 = attractor.drag_min_coef;
+					float c1 = attractor.drag_max_coef;
+					float d0 = attractor.drag_min_dist;
+					float d1 = attractor.drag_max_dist;
+					float coef = (1.0f - c1 + c0) * glm::smoothstep(d1, d0, dr_mag) + c0;
+					acc -= coef * state.vel;
+				}
+			}
+
+			for (auto& [handle, force] : get_ctx()->iterate_components<force_t>()) {
+				acc += force.dir * force.mag;
+			}
+
+			return acc;
+		}
+
+		// dumb as shit
+		glm::vec3 compute_obj2obj_force(int i) {
+			auto* physics_i = cached_components[i];
+
+			query_result.clear();
+			grid.query(physics_i->pos - physics_i->radius, physics_i->pos + physics_i->radius, query_result);
+
+			glm::vec3 acc{};
+			for (auto [cell, head, count] : query_result) {
+				for (sparse_data_iterator_t it{grid, head}; it.valid(); it.next()) {
+					int j = it.get().data;
+					if (i == j) {
+						continue;
+					}
+
+					auto* physics_j = cached_components[j];
+					glm::vec3 dr = physics_i->pos - physics_j->pos;
+
+					float r = glm::length(dr);
+					if (r <= eps) {
+						continue;
+					}
+
+					float r0 = physics_i->radius + physics_j->radius;
+					acc += o2o * std::clamp(r0 - r, 0.0f, r0) * (dr / r);
+				}
+			}
+			return acc;
+
+			/*for (int i = 0; i < cached_components.size(); i++) {
+				if (i != index) {
+					physics_t* physics_i = cached_components[i];
+					glm::vec3 dr = physics->pos - physics_i->pos;
+					float r = glm::length(dr);
+					if (r <= 1e-6) {
+						continue;
+					}
+					float r0 = physics->radius + physics_i->radius;
+					acc += o2o * std::clamp(r0 - r, 0.0f, r0) * (dr / r);
+				}
+			}*/
+			return acc;
+		}
+
+		// simplification, compute acceleration beforehand
+		// this method will update state considering it acceleration as const
+		body_state_t integrate_motion(const body_state_t& state, float dt) {
+			body_state_t new_state = state;
+			glm::vec3 acc = state.force / state.mass;
+			glm::vec3 vel_tmp = state.vel + 0.5f * acc * dt;
+			new_state.pos = state.pos + vel_tmp * dt;
+			new_state.vel = vel_tmp + 0.5f * acc * dt;
+			return new_state;
+		}
+
+		void get_integrator_updates(float dt) {
+			integrator_updates.clear();
+			for (int i = 0; i < total_objects; i++) {
+				auto& physics = *cached_components[i];
+
+				auto old_state = body_state_t{physics.pos, physics.vel, physics.force, physics.mass};
+				if (physics.no_update) {
+					integrator_updates.push_back(old_state);
+					continue;
+				}
+
+				old_state.force += compute_force(old_state);
+				old_state.force += compute_obj2obj_force(i);
+
+				auto new_state = integrate_motion(old_state, dt);
+				new_state.pos = limit_movement(old_state.pos, new_state.pos, movement_limit);
+				new_state.vel = limit_vec(new_state.vel, velocity_limit);
+				integrator_updates.push_back(new_state);
+			}
+		}
+
+		void update_physics() {
+			for (int i = 0; i < total_objects; i++) {
+				auto& physics = *cached_components[i];
+				auto& updated = integrator_updates[i];
+				physics.pos = updated.pos;
+				physics.vel = updated.vel;
+				physics.force = glm::vec3(0.0f);
+
+				// TODO : move somewhere else
+				if (!physics.valid()) {
+					physics.pos = glm::vec3(0.0f);
+					physics.vel = glm::vec3(0.0f);
+				}
+
+				if (glm::length(physics.pos) > 200.0f) {
+					glm::vec3 dir = glm::normalize(physics.pos);
+					physics.pos -= 50.0f * dir;
+					physics.vel = -std::abs(glm::dot(physics.vel, dir)) * dir;
+				}
+			}
+		}
+
+	public:
+		void update(float dt) {
+			cache_components();
+			initialize_grid();
+			for (int i = 0; i < dt_split; i++) {
+				get_integrator_updates(dt / dt_split);
+				update_physics();
+			}
+			frame++;
+		}
+
+		float get_o2o() const { return o2o; }
+		void set_o2o(float value) { o2o = value; }
+
+	private:
+		float eps{};
+		float overlap_coef{};
+		float overlap_vel_coef{};
+		float overlap_thresh{};
+		float overlap_spring_coef{};
+		int overlap_resolution_iters{};
+		float movement_limit{};
+		float velocity_limit{};
+		float touch_thresh{};
+		float touch_coef_workaround{};
+		float impact_cor{};
+		float impact_v_loss{};
+		float o2o{};
+		int dt_split{};
+
+		int frame{};
+		std::size_t total_objects{};
+		std::vector<physics_t*> cached_components;
+		std::vector<handle_t> index_to_handle;
+		std::vector<body_state_t> integrator_updates;
+		sparse_grid_t<int> grid;
+		std::vector<sparse_query_result_t> query_result;
 	};
 
 
@@ -2501,6 +2912,44 @@ void main() {
 		// TODO : whatever configuration
 	};
 
+	void sync_attractor_components(entity_t entity) {
+		auto* attractor = entity.get_component<attractor_t>();
+		if (!attractor) {
+			std::cerr << "missing attractor component. handle " << entity.get_handle() << std::endl;
+			return;
+		}
+
+		auto* transform = entity.get_component<transform_t>();
+		if (!transform) {
+			std::cerr << "missing transform component. handle " << entity.get_handle() << std::endl;
+			return;
+		}
+
+		auto* physics = entity.get_component<physics_t>();
+
+		transform->translation = attractor->pos;
+		if (physics) {
+			physics->pos = attractor->pos;
+			physics->vel = glm::vec3{0.0f};
+		}
+	}
+
+	void sync_transform_physics(entity_t entity) {
+		auto* transform = entity.get_component<transform_t>();
+		if (!transform) {
+			std::cerr << "missing transform component. handle " << entity.get_handle() << std::endl;
+			return;
+		}
+
+		auto* physics = entity.get_component<physics_t>();
+		if (!physics) {
+			std::cerr << "missing physics component. handle " << entity.get_handle() << std::endl;
+			return;
+		}
+
+		transform->translation = physics->pos;
+	}
+
 	class level_system_t : public system_if_t {
 		void scatter_balls() {
 			auto* ctx = get_ctx();
@@ -2520,7 +2969,7 @@ void main() {
 		}
 
 		inline static const glm::vec3 SPHERE_XYZ = glm::vec3(0.0f);
-		inline static const float SPHERE_R = 2.5f;
+		inline static const float SPHERE_R = 5.0f;
 
 		glm::vec3 __yin_yang(const glm::vec3& pos) {
 			glm::vec3 p = (pos - SPHERE_XYZ) / SPHERE_R;
@@ -2580,7 +3029,7 @@ void main() {
 		}
 
 		void init_balls() {
-			float r = 0.25f;
+			float r = 0.5f;
 
 			transform_t transform = {
 				.base = glm::mat4(1.0f),
@@ -2588,34 +3037,34 @@ void main() {
 				.rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f),
 				.translation = glm::vec3(0.0f) 
 			};
+
 			physics_t physics = {
 				.pos = glm::vec3(0.0f, 0.0f, 0.0f),
 				.vel = glm::vec3(0.0f, 0.0f, 0.0f),
 				.mass = 1.0f,
 				.radius = r,
 			};
+
 			basic_material_t material = {
 				.color = glm::vec3(1.0f, 1.0f, 1.0f),
-				.specular_strength = 0.5f,
-				.shininess = 32.0f,
+				.specular_strength = 1.0f,
+				.shininess = 64.0f,
 				.vao = get_ctx()->get_resource_ref<vertex_array_t>("sphere")
 			};
 
 			hsv_to_rgb_color_gen_t color_gen(42);
 
-			int count = 700;
+			int count = 5000;
 
 			ball_handles.clear();
 			for (int i = 0; i < count; i++) {
-				transform.scale = glm::vec3(0.5f);
-
 				material.color = color_gen.gen();
 
 				entity_t object = entity_t(get_ctx());
 				object.add_component(physics);
 				object.add_component(transform);
 				object.add_component(material);
-				object.add_component<sync_transform_physics_t>();
+				object.add_component(sync_component_t{sync_transform_physics});
 
 				ball_handles.push_back(object.incweakref().get_handle());
 			}
@@ -2631,23 +3080,31 @@ void main() {
 				.base = glm::mat4(1.0f),
 				.scale = glm::vec3(0.5f),
 				.rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f),
-				.translation = glm::vec3(0.0f)
+				.translation = glm::vec3(0.0f, 0.0f, 0.0f),
+			};
+
+			physics_t physics = {
+				.pos = glm::vec3(0.0f, 0.0f, 0.0f),
+				.vel = glm::vec3(0.0f, 0.0f, 0.0f),
+				.mass = 1.0f,
+				.radius = SPHERE_R,
+				.no_update = true,
 			};
 
 			attractor_t attractor = {
 				.pos = glm::vec3(0.0f),
-				.gm = 400.0f,
-				.min_dist = 2.0f,
+				.gm = 500.0f,
+				.min_dist = SPHERE_R,
 				.max_dist = 200.0f,
-				.drag_min_coef = 0.95f,
-				.drag_max_coef = 0.95f,
-				.drag_min_dist = 0.0f,
-				.drag_max_dist = SPHERE_R * 3.0f,
+				.drag_min_coef = 0.5f,
+				.drag_max_coef = 0.5f,
+				.drag_min_dist = SPHERE_R * 0.5f,
+				.drag_max_dist = SPHERE_R * 2.0f,
 			};
 
 			basic_material_t material = {
 				.color = glm::vec3(1.0f, 0.0f, 0.0f),
-				.specular_strength = 0.5f,
+				.specular_strength = 1.0f,
 				.shininess = 64.0f,
 				.vao = get_ctx()->get_resource_ref<vertex_array_t>("sphere")
 			};
@@ -2656,7 +3113,8 @@ void main() {
 			object.add_component(transform);
 			object.add_component(attractor);
 			object.add_component(material);
-			object.add_component<sync_transform_attractor_t>();
+			object.add_component(physics);
+			object.add_component(sync_component_t{sync_attractor_components});
 
 			attractor_handle = object.incweakref().get_handle();
 		}
@@ -2807,7 +3265,7 @@ void main() {
 			float t = glfw::get_time() * 0.4f;
 			entity_t viewer{get_ctx(), viewer_handle};
 			auto* camera = viewer.get_component<camera_t>();
-			camera->eye = glm::vec3(12.0f * std::cos(t), 0.0f, 12.0f * std::sin(t));
+			camera->eye = glm::vec3(12.0f * std::cos(t), 5.0f * std::sin(t * 2.0f), 12.0f * std::sin(t));
 			if (enable_yy) {
 				do_yin_yang();
 			}
@@ -2847,7 +3305,7 @@ void main() {
 				.velocity_limit = 300.0f,
 				.impact_cor = 0.8f,
 				.impact_v_loss = 0.99f,
-				.dt_split = 20,
+				.dt_split = 8,
 			};
 
 			window_system = std::make_shared<window_system_t>(ctx, window_width, window_height);
@@ -2865,17 +3323,14 @@ void main() {
 			physics_system = std::make_shared<physics_system_t>(ctx, physics_system_info);
 			ctx->add_system("physics", physics_system);
 
-			sync_transform_physics_system = std::make_shared<sync_transform_physics_system_t>(ctx);
-			ctx->add_system("sync_transform_physics", sync_transform_physics_system);
-
-			sync_transform_attractor_system = std::make_shared<sync_transform_attractor_system_t>(ctx);
-			ctx->add_system("sync_transform_attractor", sync_transform_attractor_system);
-
 			timer_system = std::make_shared<timer_system_t>(ctx);
 			ctx->add_system("timer", timer_system);
 
 			level_system = std::make_shared<level_system_t>(ctx);
 			ctx->add_system("level", level_system);
+
+			sync_component_system = std::make_shared<sync_component_system_t>(ctx);
+			ctx->add_system("sync_component", sync_component_system);
 		}
 
 		~mainloop_t() {
@@ -2884,17 +3339,14 @@ void main() {
 			// it can be basic_resources_system here, for example
 			// many resources (like textures) depend on corresponding systems so this dependency management is something to be considered
 			// for now this is fine, we got a bunch of workarounds so it must work
+			ctx->remove_system("sync_component");
+			sync_component_system.reset();
+
 			ctx->remove_system("level");
 			level_system.reset();
 
 			ctx->remove_system("timer");
 			timer_system.reset();
-
-			ctx->remove_system("sync_transform_attractor");
-			sync_transform_attractor_system.reset();
-
-			ctx->remove_system("sync_transform_physics");
-			sync_transform_physics_system.reset();
 
 			ctx->remove_system("physics");
 			physics_system.reset();
@@ -2917,24 +3369,11 @@ void main() {
 			auto& physics = *physics_system;
 			auto& basic_renderer = *basic_renderer_system;
 			auto& imgui = *imgui_system;
-			auto& sync_transform_physics = *sync_transform_physics_system;
-			auto& sync_transform_attractor = *sync_transform_attractor_system;
+			auto& sync = *sync_component_system;
 			auto& timer = *timer_system;
 			auto& level = *level_system;
 
-			imgui_system->register_callback([&](){
-				if (ImGui::Begin("mainloop")) {
-					float o2o = physics_system->get_o2o();
-					ImGui::SetNextItemWidth(-1.0f);
-					if (ImGui::SliderFloat("##o2o", &o2o, 0.0f, 300.0f, "o2o %.2f")) {
-						physics_system->set_o2o(o2o);
-					}
-				}
-				ImGui::End();
-				return true;
-			});
-
-			float dt = 0.030f;
+			float dt = 0.020f;
 			while (!window.should_close()) {
 				window.swap_buffers();
 
@@ -2942,11 +3381,10 @@ void main() {
 
 				timer.update(dt);
 				physics.update(dt);
-				sync_transform_physics.update();
-				sync_transform_attractor.update();
 				basic_renderer.update();
 				imgui.update();
 				level.update();
+				sync.update();
 			}
 		}
 
@@ -2957,10 +3395,9 @@ void main() {
 		std::shared_ptr<basic_renderer_system_t> basic_renderer_system;
 		std::shared_ptr<imgui_system_t> imgui_system;
 		std::shared_ptr<physics_system_t> physics_system;
-		std::shared_ptr<sync_transform_physics_system_t> sync_transform_physics_system;
-		std::shared_ptr<sync_transform_attractor_system_t> sync_transform_attractor_system;
 		std::shared_ptr<timer_system_t> timer_system;
 		std::shared_ptr<level_system_t> level_system;
+		std::shared_ptr<sync_component_system_t> sync_component_system;
 	};
 
 	// test class
@@ -2986,28 +3423,173 @@ void main() {
 	// TODO : logging
 
 	// TODO : advanced physics
-	// TODO : grid update method
+	// TODO : octotree
 	// TODO : multithreaded update
 
+	// TODO : vulkan
+	// TODO : completely rework rendering system
+	// TODO : debug renderer
 	// TODO : advanced drawing
-	// TODO : G-buffer
-	// TODO : create depth texture
-	// TODO : create color texture
-	// TODO : create normal texture
-	// TODO : create pos texture
-	// TODO : instanced drawing
-	// TODO : create first pass : draw everything into the G-buffer
-	// TODO : create second pass : apply light
+	// TODO : instanced rendering of my BALLS
 
 	// TODO : whatever TODO you see
 
-	// ...
-
-	// TODO : forget about this, it's done, time to move forward
+	// TODO : point of no return - next iteration
 }
 
 
+// some pile of shit (tests)
+void assert_check(bool value, std::string_view error) {
+	if (!value) {
+		std::cerr << error << "\n";
+		std::abort();
+	}
+}
+
+void assert_false(bool value, std::string_view error) {
+	assert_check(!value, error);
+}
+
+void assert_true(bool value, std::string_view error) {
+	assert_check(value, error);
+}
+
+void test_octotree_stuff() {
+	aabb_t box{glm::vec3{0.0f}, glm::vec3{3.0f}};
+
+	// box-box
+	aabb_t box1{glm::vec3{-1.0, 1.0f, 1.0f}, glm::vec3{4.0f, 2.0f, 2.0f}};
+	aabb_t box2{glm::vec3{1.0f, -1.0f, 1.0f}, glm::vec3{2.0f, 4.0f, 2.0f}};
+	aabb_t box3{glm::vec3{1.0f, 1.0f, -1.0f}, glm::vec3{2.0f, 2.0f, 4.0f}};
+	aabb_t box4{glm::vec3{4.0f}, glm::vec3{5.0f}};
+	aabb_t box5{glm::vec3{-2.0f}, glm::vec3{-1.0f}};
+	aabb_t box6{glm::vec3{3.0f}, glm::vec3{4.0f}};
+
+	assert_check(test_intersection_aabb_aabb(box, box), "box-box: must intersect");
+	assert_check(test_intersection_aabb_aabb(box, box1), "box-box: must intersect");
+	assert_check(test_intersection_aabb_aabb(box, box2), "box-box: must intersect");
+	assert_check(test_intersection_aabb_aabb(box, box3), "box-box: must intersect");
+
+	assert_check(!test_intersection_aabb_aabb(box, box4), "box-box: must not intersect");
+	assert_check(!test_intersection_aabb_aabb(box, box5), "box-box: must not intersect");
+
+	assert_check(test_intersection_aabb_aabb(box, box6), "box-box: must intersect");
+
+	// box-point
+	glm::vec3 p1{4.0f};
+	glm::vec3 p2{-1.0f};
+	glm::vec3 p3{1.0f, 1.0f, 4.0f};
+	glm::vec3 p4{1.0f, 4.0f, 1.0f};
+	glm::vec3 p5{4.0f, 1.0f, 1.0f};
+	glm::vec3 p6{1.0f};
+	glm::vec3 p7{3.0f};
+
+	assert_check(!test_intersection_aabb_point(box, p1), "box-point: must not intersect");
+	assert_check(!test_intersection_aabb_point(box, p2), "box-point: must not intersect");
+	assert_check(!test_intersection_aabb_point(box, p3), "box-point: must not intersect");
+	assert_check(!test_intersection_aabb_point(box, p4), "box-point: must not intersect");
+	assert_check(!test_intersection_aabb_point(box, p5), "box-point: must not intersect");
+	assert_check(test_intersection_aabb_point(box, p6), "box-point: must intersect");
+	assert_check(test_intersection_aabb_point(box, p7), "box-point: must intersect");
+
+	std::cout << "octotree tests passed\n";
+}
+
+void test_sparse_grid_hash() {
+	auto hash = sparse_cell_hasher_t{};
+
+	std::unordered_map<std::uint32_t, std::uint32_t> hash_count;
+	for (int i = -1000; i < 1000; i += 11) {
+		for (int j = -1000; j < 1000; j += 11) {
+			for (int k = -1000; k < 1000; k += 11) {
+				hash_count[hash(sparse_cell_t{i, j, k})]++;
+			}
+		}
+	}
+
+	for (int i = -1000000; i < 1000000; i++) {
+		hash_count[hash(sparse_cell_t{i, 0, 0})]++;
+		hash_count[hash(sparse_cell_t{0, i, 0})]++;
+		hash_count[hash(sparse_cell_t{0, 0, i})]++;
+	}
+
+	for (int i = -1000; i < 1000; i++) {
+		for (int j = -1000; j < 1000; j++) {
+			hash_count[hash(sparse_cell_t{i, j, 0})]++;
+			hash_count[hash(sparse_cell_t{i, 0, j})]++;
+			hash_count[hash(sparse_cell_t{0, i, j})]++;
+		}
+	}
+
+	std::uint32_t min_count = ~0;
+	std::uint32_t max_count = 0;
+	for (auto& [hash, count] : hash_count) {
+		min_count = std::min(min_count, count);
+		max_count = std::max(max_count, count);
+	}
+
+	std::unordered_map<std::uint32_t, std::uint32_t> hash_count_count;
+	for (auto& [hash, count] : hash_count) {
+		hash_count_count[count]++;
+	}
+
+	std::cout << "hashes: " << hash_count.size() << " min_count: " << min_count << " max_count: " << max_count << "\n";
+	std::cout << "unique_counts: " << hash_count_count.size() << "\n";
+}
+
+void test_sparse_grid() {
+	auto print_data = [&] (const sparse_grid_t<int>& grid, int head) {
+		for (sparse_data_iterator_t iter{grid, head}; iter.valid(); iter.next()) {
+			std::cout << iter.get().data << " ";
+		}
+	};
+
+	sparse_grid_t<int> grid(2.0f, -100000, 100000);
+	for (int i = 0; i < 4; i++) {
+		for (int j = 0; j < 4; j++) {
+			for (int k = 0; k < 4; k++) {
+				grid.add(glm::vec3{i, j, k}, i * 16 + j * 4 + k);
+			}
+		}
+	}
+
+	for (auto& [cell, info] : grid.get_cell_storage()) {
+		std::cout << "cell: " << cell.x << ":" << cell.y << ":" << cell.z << " count: " << info.count << "\n\t";
+		print_data(grid, info.head);
+		std::cout << "\n";
+	}
+
+	auto print_query = [&] (const sparse_grid_t<int>& grid, const glm::vec3& min, const glm::vec3& max, const std::vector<sparse_query_result_t>& result) {
+		std::cout << "min: " << min.x << ":" << min.y << ":" << min.z
+			<< " max: " << max.x << ":" << max.y << ":" << max.z
+			<< " result size: " << result.size() << "\n";
+		for (auto& [cell, head, count] : result) {
+			std::cout << "cell: " << cell.x << ":" << cell.y << ":" << cell.z << " count: " << count << "\n\t";
+			print_data(grid, head);
+			std::cout << "\n";
+		}
+		std::cout << "\n";
+	};
+
+	std::vector<sparse_query_result_t> result;
+
+	for (int i = 0; i < 8; i++) {
+		glm::vec3 min{(i & 1) * 2, ((i >> 1) & 1) * 2, ((i >> 2) & 1) * 2};
+		glm::vec3 max = min + glm::vec3{1};
+		grid.query(min, max, result);
+		print_query(grid, min, max, result);
+		result.clear();
+	}
+
+	grid.query(sparse_cell_t{-1}, sparse_cell_t{-1}, result);
+	assert_check(result.empty(), "result is not empty");
+}
+
 int main() {
+	//test_octotree_stuff();
+	//test_sparse_grid_hash();
+	//test_sparse_grid();
+
 	engine_t engine;
 	engine.execute();
 	return 0;
