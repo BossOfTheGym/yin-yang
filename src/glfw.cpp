@@ -33,6 +33,7 @@ namespace glfw {
 		params.set_hint(GLFW_DOUBLEBUFFER, GLFW_TRUE);
 		params.set_hint(GLFW_CENTER_CURSOR, GLFW_TRUE);
 		params.set_hint(GLFW_CLIENT_API, GLFW_OPENGL_API);
+		params.set_hint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 		params.set_hint(GLFW_CONTEXT_VERSION_MAJOR, major);
 		params.set_hint(GLFW_CONTEXT_VERSION_MINOR, minor);
 		return params;

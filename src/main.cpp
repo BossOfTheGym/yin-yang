@@ -3,12 +3,16 @@
 #include <map>
 #include <set>
 #include <tuple>
+#include <mutex>
 #include <deque>
 #include <cmath>
+#include <queue>
 #include <string>
+#include <thread>
 #include <memory>
 #include <random>
 #include <vector>
+#include <atomic>
 #include <cassert>
 #include <iomanip>
 #include <utility>
@@ -27,6 +31,7 @@
 #include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
+#include <condition_variable>
 
 #include <glfw.hpp>
 #include <dt_timer.hpp>
@@ -63,8 +68,8 @@ namespace {
 			return;
 		}
 
-		float content_width = std::max(ImGui::GetContentRegionAvail().x, 1.0f);
-		float ratio = 1.0f;//std::min(content_width, size.x) / size.x;
+		ImVec2 content_size = ImGui::GetContentRegionAvail();
+		float ratio = std::min(content_size.x / size.x, content_size.y / size.y);
 		float width = size.x * ratio;
 		float height = size.y * ratio;
 
@@ -140,6 +145,8 @@ namespace {
 
 	enum texture_internal_format_t : GLenum {
 		Rgba32f = GL_RGBA32F,
+		Rgba16f = GL_RGBA16F,
+		Rgba8 = GL_RGBA8,
 	};
 
 	texture_t gen_empty_texture(int width, int height, texture_internal_format_t format) {
@@ -338,6 +345,42 @@ namespace {
 		mesh.vertex_attrib.type = GL_FLOAT;
 		mesh.faces = subdivided.size();
 		mesh.vertices = subdivided.size() * 3;
+		mesh.mode = GL_TRIANGLES;
+		return mesh;
+	}
+
+	#define ARRAY_SIZE(arr) (sizeof(arr) / (sizeof(arr[0])))
+
+	mesh_t gen_pyramid_mesh() {
+		struct face_t {
+			glm::vec3 v0, v1, v2;
+		};
+
+		glm::vec3 verts[4] = {
+			glm::vec3{0.0f, 0.0f, 0.0f},
+			glm::vec3{1.0f, 0.0f, 0.0f},
+			glm::vec3{0.0f, 1.0f, 0.0f},
+			glm::vec3{0.0f, 0.0f, 1.0f},
+		};
+		face_t faces[] = {
+			{verts[0], verts[1], verts[2]},
+			{verts[0], verts[2], verts[3]},
+			{verts[0], verts[3], verts[1]},
+			{verts[1], verts[3], verts[2]},
+		};
+
+		mesh_t mesh{};
+		glCreateBuffers(1, &mesh.id);
+		glNamedBufferStorage(mesh.id, sizeof(faces), faces, 0);
+		mesh.vertex_buffer.offset = 0;
+		mesh.vertex_buffer.stride = 3 * sizeof(float);
+		mesh.vertex_attrib.attrib_index = Vertex0;
+		mesh.vertex_attrib.normalized = GL_FALSE;
+		mesh.vertex_attrib.relative_offset = 0;
+		mesh.vertex_attrib.size = 3;
+		mesh.vertex_attrib.type = GL_FLOAT;
+		mesh.faces = ARRAY_SIZE(faces);
+		mesh.vertices = ARRAY_SIZE(faces) * 3;
 		mesh.mode = GL_TRIANGLES;
 		return mesh;
 	}
@@ -717,6 +760,7 @@ namespace {
 	const inline std::string basic_vert_source =
 R"(
 #version 460 core
+
 layout(location = 0) in vec3 attr_pos;
 
 uniform mat4 u_m;
@@ -735,7 +779,6 @@ void main() {
 	const inline std::string basic_frag_source =
 R"(
 #version 460 core
-#extension GL_ARB_gpu_shader_int64 : require
 
 layout(location = 0) out vec4 color;
 
@@ -772,11 +815,67 @@ void main() {
 	float specular_coef = u_specular_strength * pow(clamp(dot(normal, spec_vec), 0.0, 1.0), u_shininess);
 	vec3 specular = specular_coef * u_light_color;
 
-	uint64_t a = 0xdeadbeefdeadbeeful;
-	int b = int(a);
-
 	float att_coef = 1.0 / (0.1 + dist * dist);
 	color = vec4((ambient + 64.0 * (diffuse + specular) * att_coef) * object_color, 1.0);
+}
+)";
+
+	const inline std::string basic_vert_instanced_source =
+R"(
+#version 460 core
+
+layout(location = 0) in vec3 attr_pos;
+
+layout(std430, binding = 0) readonly buffer instanced_m {
+    mat4 m[];
+};
+
+uniform mat4 u_v;
+uniform mat4 u_p;
+
+out vec3 world_pos;
+flat out int object_id;
+
+void main() {
+	u_v;
+	vec4 pos = m[gl_InstanceID] * vec4(attr_pos, 1.0);
+	world_pos = pos.xyz;
+	object_id = gl_InstanceID;
+	gl_Position = u_p * pos;
+}
+)";
+
+	const inline std::string basic_frag_instanced_source =
+R"(
+#version 460 core
+
+layout(location = 0) out vec4 color;
+
+in vec3 world_pos;
+flat in int object_id;
+
+struct material {
+	vec3 object_color;
+	float shininess;
+	float specular_strength;
+};
+
+layout(std430, binding = 1) readonly buffer instanced_mtl {
+    material mtl[];
+};
+
+uniform vec3 u_eye_pos;
+
+uniform vec3 u_ambient_color;
+uniform vec3 u_light_color;
+uniform vec3 u_light_pos;
+
+void main() {
+	vec3 object_color = mtl[object_id].object_color;
+	vec3 dummy = u_eye_pos + u_ambient_color + u_light_color + u_light_color;
+	vec3 d = world_pos - u_light_pos;
+	float att = 1.0f / length(d);
+	color = vec4(object_color * u_light_color * att, 1.0);
 }
 )";
 
@@ -800,6 +899,56 @@ void main() {
 		}
 		return std::make_tuple(std::move(program), out.str());
 	}
+
+	std::tuple<shader_program_t, std::string> gen_basic_instanced_shader_program() {
+		std::ostringstream out;
+
+		shader_t vert = shader_t::create(basic_vert_instanced_source, GL_VERTEX_SHADER);
+		if (!vert.compiled()) {
+			out << "*** Failed to compile vert shader:\n" << vert.get_info_log() << "\n";
+		}
+
+		shader_t frag = shader_t::create(basic_frag_instanced_source, GL_FRAGMENT_SHADER);
+		if (!frag.compiled()) {
+			out << "*** Failed to compile frag shader:\n" << frag.get_info_log() << "\n";
+		}
+
+		shader_program_t program = shader_program_t::create(vert, frag);
+		if (!program.linked()) {
+			out << "*** Failed to link program:\n" << program.get_info_log() << "\n";
+			program = shader_program_t{};
+		}
+		return std::make_tuple(std::move(program), out.str());
+	}
+
+	// very simple write-only buffer that is mapped by default
+	struct gpu_buffer_t {
+		gpu_buffer_t(std::uint64_t _size) {
+			size = (_size + 63) & ~(std::uint64_t)63;
+			size *= 2;
+
+			glCreateBuffers(1, &buffer_id);
+			glNamedBufferStorage(buffer_id, size, nullptr, GL_MAP_PERSISTENT_BIT | GL_MAP_WRITE_BIT /*| GL_MAP_COHERENT_BIT*/);
+			mapped_pointer = glMapNamedBufferRange(buffer_id, 0, size, GL_MAP_PERSISTENT_BIT | GL_MAP_WRITE_BIT /*| GL_MAP_COHERENT_BIT*/);
+		}
+
+		~gpu_buffer_t() {
+			glUnmapNamedBuffer(buffer_id);
+			glDeleteBuffers(1, &buffer_id);
+		}
+
+		void* get_front() const {
+			return mapped_pointer;
+		}
+
+		void* get_back() const {
+			return (char*)mapped_pointer + size / 2;
+		}
+
+		GLuint buffer_id{};
+		std::uint64_t size{};
+		void* mapped_pointer{};
+	};
 
 
 	namespace impl {
@@ -1713,6 +1862,145 @@ void main() {
 	};
 
 
+	template<class data_t>
+	struct mt_queue_t {
+		template<class _data_t>
+		void push(_data_t&& data) {
+			std::unique_lock lock_guard{lock};
+			queue.push(std::forward<_data_t>(data));
+			added.notify_one();
+		}
+
+		data_t pop() {
+			std::unique_lock lock_guard{lock};
+			if (queue.empty()) {
+				added.wait(lock_guard, [&] (){
+					return !queue.empty();
+				});
+			}
+			data_t data = std::move(queue.front());
+			queue.pop();
+			return data;
+		}
+
+		std::mutex lock;
+		std::condition_variable added;
+		std::queue<data_t> queue;
+	};
+
+	struct job_if_t {
+		job_if_t() = default;
+		virtual ~job_if_t() = default;
+
+		job_if_t(job_if_t&&) noexcept = delete;
+		job_if_t& operator= (job_if_t&&) noexcept = delete;
+
+		job_if_t(const job_if_t&) = delete;
+		job_if_t& operator= (const job_if_t&) = delete;
+
+		virtual void execute() = 0;
+
+		void set_ready() {
+			std::unique_lock lock_guard{lock};
+			ready_status = true;
+			ready.notify_all();
+		}
+
+		void wait() {
+			std::unique_lock lock_guard{lock};
+			ready.wait(lock_guard, [&] (){
+				return ready_status;
+			});
+			ready_status = false;
+		}
+
+		std::mutex lock;
+		std::condition_variable ready;
+		bool ready_status{};
+	};
+
+	struct dummy_job_t : public job_if_t {
+		void execute() override
+		{}
+	};
+
+	template<class func_t>
+	struct func_job_t : public job_if_t {
+		template<class _func_t>		
+		func_job_t(_func_t&& _func)
+			: func{std::forward<_func_t>(_func)}
+		{}
+
+		void execute() override {
+			func();
+		}
+
+		func_t func;
+	};
+
+	template<class func_t>
+	func_job_t(func_t&& func) -> func_job_t<func_t>;
+
+
+	struct thread_pool_t {
+		static constexpr int thread_count_fallback = 8;
+
+		thread_pool_t(int thread_count = 0) {
+			if (thread_count <= 0) {
+				thread_count = thread_count_fallback;
+			}
+			for (int i = 0; i < thread_count; i++) {
+				workers.push_back(std::thread([&]() {
+					thread_pool_worker_func();
+				}));
+			}
+		}
+
+		~thread_pool_t() {
+			terminating.store(true, std::memory_order_relaxed); // queue will sync variable 'terminating' due to acquire-release in the underlying mutex
+
+			std::vector<dummy_job_t> dummy_jobs(workers.size());
+			for (auto& job : dummy_jobs) {
+				push_job(&job);
+			}
+
+			std::unique_lock lock_guard{lock};
+			worker_terminated.wait(lock_guard, [&] (){
+				return workers_terminated == workers.size();
+			});
+			lock_guard.unlock();
+
+			for (auto& worker : workers) {
+				worker.join();
+			}
+		}
+
+		void thread_pool_worker_func() {
+			while (!terminating.load(std::memory_order_relaxed)) { // will be synced in a destructor
+				job_if_t* job = job_queue.pop();
+				job->execute();
+				job->set_ready();
+			}
+
+			std::unique_lock lock_guard{lock};
+			workers_terminated++;
+			worker_terminated.notify_one();
+		}
+
+		void push_job(job_if_t* job) {
+			job_queue.push(job);
+		}
+
+		std::vector<std::thread> workers;
+		mt_queue_t<job_if_t*> job_queue;
+
+		std::mutex lock;
+		std::condition_variable worker_terminated;
+		int workers_terminated{};
+		std::atomic<bool> terminating{};
+	};
+
+
 	using tick_t = float;
 	using timer_component_t = dt_timer_t<tick_t>;
 
@@ -1777,43 +2065,7 @@ void main() {
 			}
 		}
 	};
-	
 
-	class basic_resources_system_t : public system_if_t {
-	public:
-		basic_resources_system_t(engine_ctx_t* ctx, int tex_width, int tex_height) : system_if_t(ctx) {
-			auto program_ptr = ([&] () {
-				auto [program, info_log] = gen_basic_shader_program();
-					if (!program.valid()) {
-						std::cerr << info_log << std::endl;
-						return std::make_shared<shader_program_t>();
-					}
-					return std::make_shared<shader_program_t>(std::move(program));
-				}
-			)();
-
-			auto sphere_mesh_ptr = std::make_shared<mesh_t>(gen_sphere_mesh(5));
-			auto sphere_vao_ptr = std::make_shared<vertex_array_t>(gen_vertex_array_from_mesh(*sphere_mesh_ptr));
-			auto color = std::make_shared<texture_t>(gen_empty_texture(tex_width, tex_height, Rgba32f));
-			auto depth = std::make_shared<texture_t>(gen_depth_texture(tex_width, tex_height, Depth32f));
-
-			ctx->add_resource<shader_program_t>("basic_program", std::move(program_ptr));
-			ctx->add_resource<mesh_t>("sphere", std::move(sphere_mesh_ptr));
-			ctx->add_resource<vertex_array_t>("sphere", std::move(sphere_vao_ptr));
-			ctx->add_resource<texture_t>("color", std::move(color));
-			ctx->add_resource<texture_t>("depth", std::move(depth));
-		}
-
-		~basic_resources_system_t() {
-			// completely unneccessary
-			auto* ctx = get_ctx();
-			ctx->remove_resource<texture_t>("depth");
-			ctx->remove_resource<texture_t>("color");
-			ctx->remove_resource<vertex_array_t>("sphere");
-			ctx->remove_resource<mesh_t>("sphere");
-			ctx->remove_resource<shader_program_t>("basic_program");
-		} 
-	};
 
 	struct camera_t {
 		glm::mat4 get_view() const {
@@ -1836,13 +2088,6 @@ void main() {
 		glm::vec3 ambient{};
 		glm::vec3 color{};
 		glm::vec3 pos{};
-	};	
-
-	struct basic_material_t {
-		glm::vec3 color{};
-		float specular_strength{};
-		float shininess{};
-		resource_ref_t<vertex_array_t> vao;
 	};
 
 	struct viewport_t {
@@ -1853,135 +2098,6 @@ void main() {
 		int x{}, y{}, width{}, height{};
 	};
 
-	struct basic_pass_t {
-		resource_ref_t<framebuffer_t> framebuffer;
-		viewport_t viewport{};
-		glm::vec4 clear_color{};
-		float clear_depth{};
-		weak_entity_t camera{};
-		weak_entity_t light{};
-	};
-
-	// TODO : instanced rendering
-	class basic_renderer_system_t : public system_if_t {
-	public:
-		basic_renderer_system_t(engine_ctx_t* ctx) : system_if_t(ctx) {
-			program = get_ctx()->get_resource<shader_program_t>("basic_program");
-		}
-
-	private:
-		void render_pass(basic_pass_t* pass, camera_t* camera, omnidir_light_t* light) {
-			// TODO : create utility to save/restore context
-			struct save_restore_render_state_t {
-				save_restore_render_state_t() {
-					glGetIntegerv(GL_VIEWPORT, viewport);
-					glGetFloatv(GL_COLOR_CLEAR_VALUE, clear_color);
-					glGetFloatv(GL_DEPTH_CLEAR_VALUE, &clear_depth);
-					glGetBooleanv(GL_DEPTH_TEST, &depth_test);
-					glGetBooleanv(GL_CULL_FACE, &cull_face);
-				}
-
-				~save_restore_render_state_t() {
-					glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
-					glClearColor(clear_color[0], clear_color[1], clear_color[2], clear_color[3]);
-					glClearDepth(clear_depth);
-					
-					if (depth_test) {
-						glEnable(GL_DEPTH_TEST);
-					} else {
-						glDisable(GL_DEPTH_TEST);
-					}
-					
-					if (cull_face) {
-						glEnable(GL_CULL_FACE);
-					} else {
-						glDisable(GL_CULL_FACE);
-					}
-				}
-
-				GLfloat clear_color[4] = {};
-				GLfloat clear_depth{};
-				GLint viewport[4]{};
-				GLboolean depth_test{};
-				GLboolean cull_face{};
-			} state;
-
-			if (auto framebuffer = pass->framebuffer.lock()) {
-				framebuffer->bind();
-			} else {
-				std::cerr << "framebuffer expired" << std::endl;
-				return;
-			}
-
-			auto& viewport = pass->viewport;
-			glViewport(viewport.x, viewport.y, viewport.width, viewport.height);
-			auto& col = pass->clear_color;
-			glClearColor(col.r, col.g, col.b, col.a);
-			glClearDepth(pass->clear_depth);
-			glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-			glEnable(GL_DEPTH_TEST);
-			glEnable(GL_CULL_FACE);
-
-			program->use();
-			program->set_mat4("u_v", camera->get_view());
-			program->set_mat4("u_p", camera->get_proj(viewport.get_aspect_ratio()));
-			program->set_vec3("u_eye_pos", camera->eye);
-			program->set_vec3("u_ambient_color", light->ambient);
-			program->set_vec3("u_light_color", light->color);
-			program->set_vec3("u_light_pos", light->pos);
-
-			GLuint prev_vao{};
-			for (auto& [handle, material] : get_ctx()->iterate_components<basic_material_t>()) {
-				continue;
-
-				auto* transform = get_ctx()->get_component<transform_t>(handle);
-				if (!transform) {
-					std::cerr << "missing transform component. handle: " << handle << std::endl;
-					continue;
-				}
-
-				auto vao = material.vao.lock();
-				if (!vao) {
-					std::cerr << "vao expired" << std::endl;
-					continue;
-				}
-
-				if (vao->id != prev_vao) {
-					vao->bind();
-					prev_vao = vao->id;
-				}
-
-				program->set_mat4("u_m", transform->to_mat4());
-				program->set_vec3("u_object_color", material.color);
-				program->set_float("u_shininess", material.shininess);
-				program->set_float("u_specular_strength", material.specular_strength);
-				glDrawArrays(vao->mode, 0, vao->count);
-			}
-		}
-
-	public:
-		void update() {
-			for (auto& [handle, pass] : get_ctx()->iterate_components<basic_pass_t>()) {
-				auto* camera = pass.camera.get().get_component<camera_t>();
-				if (!camera) {
-					std::cerr << "missing camera component. handle: " << handle << " camera: " << pass.camera.get().get_handle() << std::endl;
-					continue;
-				}
-
-				auto* light = pass.light.get().get_component<omnidir_light_t>();
-				if (!light) {
-					std::cerr << "missing light component. handle: " << handle << " light: " << pass.light.get().get_handle() << std::endl;
-					continue;
-				}
-
-				render_pass(&pass, camera, light);
-			}
-		}
-
-	private:
-		resource_ptr_t<shader_program_t> program;
-	};
-
 
 	struct imgui_pass_t {
 		resource_ref_t<framebuffer_t> framebuffer;
@@ -1990,7 +2106,6 @@ void main() {
 		float clear_depth{};
 	};
 
-	// for now simplified
 	class imgui_system_t : public system_if_t {
 	public:
 		using gui_callback_t = std::function<bool()>;
@@ -2006,7 +2121,7 @@ void main() {
 			register_callback([&] () {
 				ImGui::ShowDemoWindow();
 				return true;
-			});
+				});
 		}
 
 		~imgui_system_t() {
@@ -2054,7 +2169,7 @@ void main() {
 					} else {
 						glDisable(GL_DEPTH_TEST);
 					}
-					
+
 					if (cull_face) {
 						glEnable(GL_CULL_FACE);
 					} else {
@@ -2104,6 +2219,254 @@ void main() {
 	};
 
 
+	class basic_resources_system_t : public system_if_t {
+	public:
+		basic_resources_system_t(engine_ctx_t* ctx, int tex_width, int tex_height) : system_if_t(ctx) {
+			auto basic_program_ptr = ([&] () {
+				auto [program, info_log] = gen_basic_shader_program();
+				if (!program.valid()) {
+					std::cerr << info_log << std::endl;
+					return std::make_shared<shader_program_t>();
+				}
+				return std::make_shared<shader_program_t>(std::move(program));
+			})();
+
+			auto basic_instanced_program_ptr = ([&] () {
+				auto [program, info_log] = gen_basic_instanced_shader_program();
+				if (!program.valid()) {
+					std::cerr << info_log << std::endl;
+					return std::make_shared<shader_program_t>();
+				}
+				return std::make_shared<shader_program_t>(std::move(program));
+			})();
+
+			auto sphere_mesh_ptr = std::make_shared<mesh_t>(gen_sphere_mesh(3));
+			auto sphere_vao_ptr = std::make_shared<vertex_array_t>(gen_vertex_array_from_mesh(*sphere_mesh_ptr));
+			auto pyramid_mesh_ptr = std::make_shared<mesh_t>(gen_pyramid_mesh());
+			auto pyramid_vao_ptr = std::make_shared<vertex_array_t>(gen_vertex_array_from_mesh(*pyramid_mesh_ptr));
+			auto color = std::make_shared<texture_t>(gen_empty_texture(tex_width, tex_height, Rgba32f));
+			auto depth = std::make_shared<texture_t>(gen_depth_texture(tex_width, tex_height, Depth32f));
+
+			ctx->add_resource<shader_program_t>("basic_program", std::move(basic_program_ptr));
+			ctx->add_resource<shader_program_t>("basic_instanced_program", std::move(basic_instanced_program_ptr));
+			ctx->add_resource<mesh_t>("sphere", std::move(sphere_mesh_ptr));
+			ctx->add_resource<vertex_array_t>("sphere", std::move(sphere_vao_ptr));
+			ctx->add_resource<mesh_t>("pyramid", std::move(pyramid_mesh_ptr));
+			ctx->add_resource<vertex_array_t>("pyramid", std::move(pyramid_vao_ptr));
+			ctx->add_resource<texture_t>("color", std::move(color));
+			ctx->add_resource<texture_t>("depth", std::move(depth));
+		}
+
+		~basic_resources_system_t() {
+			// completely unneccessary
+			auto* ctx = get_ctx();
+			ctx->remove_resource<texture_t>("depth");
+			ctx->remove_resource<texture_t>("color");
+			ctx->remove_resource<vertex_array_t>("sphere");
+			ctx->remove_resource<mesh_t>("sphere");
+			ctx->remove_resource<shader_program_t>("basic_program");
+			ctx->remove_resource<shader_program_t>("basic_instanced_program");
+		} 
+	};
+
+
+	struct basic_material_t {
+		glm::vec3 color{};
+		float specular_strength{};
+		float shininess{};
+		resource_ref_t<vertex_array_t> vao;
+	};
+
+	struct basic_pass_t {
+		resource_ref_t<framebuffer_t> framebuffer;
+		viewport_t viewport{};
+		glm::vec4 clear_color{};
+		float clear_depth{};
+		weak_entity_t camera{};
+		weak_entity_t light{};
+	};
+
+	#define std430_vec3 alignas(sizeof(glm::vec4)) glm::vec3
+	#define std430_vec4 alignas(sizeof(glm::vec4)) glm::vec4
+	#define std430_float alignas(sizeof(float)) float
+
+	class basic_renderer_system_t : public system_if_t {
+	public:
+		struct std430_basic_material_t {
+			std430_vec3 color{};
+			std430_float shininess{};
+			std430_float specular_strength{};
+		};
+
+		static constexpr int max_instances = 100000;
+
+		basic_renderer_system_t(engine_ctx_t* ctx) : system_if_t(ctx) {
+			program = get_ctx()->get_resource<shader_program_t>("basic_program");
+			instanced_program = get_ctx()->get_resource<shader_program_t>("basic_instanced_program");
+
+			sphere = get_ctx()->get_resource<vertex_array_t>("sphere");
+
+			m_size = max_instances * sizeof(glm::mat4);
+			object_mtl_size = max_instances * sizeof(std430_basic_material_t);
+
+			instance_buffer = std::make_unique<gpu_buffer_t>(m_size + object_mtl_size + 2 * 256);
+
+			m_offset = (((std::uintptr_t)instance_buffer->mapped_pointer + 255ull) & ~255ull) - (std::uintptr_t)instance_buffer->mapped_pointer;
+			object_mtl_offset = (m_offset + m_size + 255ull) & ~255ull;
+
+			m = (glm::mat4*)((char*)instance_buffer->mapped_pointer + m_offset);
+			object_mtl = (std430_basic_material_t*)((char*)instance_buffer->mapped_pointer + object_mtl_offset);
+
+			auto* imgui = get_ctx()->get_system<imgui_system_t>("imgui");
+			imgui->register_callback([&] () {
+				ImGui::SetNextWindowSize(ImVec2{256, 256}, ImGuiCond_Once);
+				if (ImGui::Begin("basic renderer")) {
+					ImGui::Checkbox("submit data", &submit_data);
+				}
+				ImGui::End();
+				return true;
+			});
+		}
+
+	private:
+		void render_pass_instanced(basic_pass_t* pass, camera_t* camera, omnidir_light_t* light) {
+			// TODO : create utility to save/restore context
+			struct save_restore_render_state_t {
+				save_restore_render_state_t() {
+					glGetIntegerv(GL_VIEWPORT, viewport);
+					glGetFloatv(GL_COLOR_CLEAR_VALUE, clear_color);
+					glGetFloatv(GL_DEPTH_CLEAR_VALUE, &clear_depth);
+					glGetBooleanv(GL_DEPTH_TEST, &depth_test);
+					glGetBooleanv(GL_CULL_FACE, &cull_face);
+				}
+
+				~save_restore_render_state_t() {
+					glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
+					glClearColor(clear_color[0], clear_color[1], clear_color[2], clear_color[3]);
+					glClearDepth(clear_depth);
+
+					if (depth_test) {
+						glEnable(GL_DEPTH_TEST);
+					} else {
+						glDisable(GL_DEPTH_TEST);
+					}
+
+					if (cull_face) {
+						glEnable(GL_CULL_FACE);
+					} else {
+						glDisable(GL_CULL_FACE);
+					}
+				}
+
+				GLfloat clear_color[4] = {};
+				GLfloat clear_depth{};
+				GLint viewport[4]{};
+				GLboolean depth_test{};
+				GLboolean cull_face{};
+			} state;
+
+			if (auto framebuffer = pass->framebuffer.lock()) {
+				framebuffer->bind();
+			} else {
+				std::cerr << "framebuffer expired" << std::endl;
+				return;
+			}
+
+			auto* ctx = get_ctx();
+
+			int object_count = 0;
+			if (submit_data) {
+				for (auto& [handle, material] : ctx->iterate_components<basic_material_t>()) {
+					auto* transform = ctx->get_component<transform_t>(handle);
+					if (!transform) {
+						std::cerr << "missing transform component. handle: " << handle << std::endl;
+						continue;
+					}
+
+					m[object_count] = transform->to_mat4();
+
+					auto& mtl = object_mtl[object_count];
+					mtl.color = material.color;
+					mtl.shininess = material.shininess;
+					mtl.specular_strength = material.specular_strength;
+
+					object_count++;
+				}
+				last_submitted = object_count;
+			} else {
+				object_count = last_submitted;
+			}
+
+			auto& viewport = pass->viewport;
+			glViewport(viewport.x, viewport.y, viewport.width, viewport.height);
+			auto& col = pass->clear_color;
+			glClearColor(col.r, col.g, col.b, col.a);
+			glClearDepth(pass->clear_depth);
+			glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+			glEnable(GL_DEPTH_TEST);
+			glEnable(GL_CULL_FACE);
+
+			instanced_program->use();
+			//instanced_program->set_mat4("u_v", camera->get_view());
+			instanced_program->set_mat4("u_p", camera->get_proj(viewport.get_aspect_ratio()) * camera->get_view());
+			instanced_program->set_vec3("u_eye_pos", camera->eye);
+			instanced_program->set_vec3("u_ambient_color", light->ambient);
+			instanced_program->set_vec3("u_light_color", light->color);
+			instanced_program->set_vec3("u_light_pos", light->pos);
+
+			sphere->bind();
+			/*glBindBufferRange(GL_SHADER_STORAGE_BUFFER, 0, instance_buffer->buffer_id, m_offset, m_size);
+			glBindBufferRange(GL_SHADER_STORAGE_BUFFER, 1, instance_buffer->buffer_id, object_mtl_offset, object_mtl_size);
+			glDrawArraysInstanced(sphere->mode, 0, sphere->count, object_count);*/
+
+			int split = 8;
+			int part = object_count / split;
+			for (int start = 0; start < object_count; start += part) {
+				int inst_count = std::min(start + part, object_count) - start;
+
+				glBindBufferRange(GL_SHADER_STORAGE_BUFFER, 0, instance_buffer->buffer_id, m_offset + sizeof(glm::mat4) * start, sizeof(glm::mat4) * inst_count);
+				glBindBufferRange(GL_SHADER_STORAGE_BUFFER, 1, instance_buffer->buffer_id, object_mtl_offset + sizeof(std430_basic_material_t) * start, sizeof(std430_basic_material_t) * inst_count);
+				glDrawArraysInstanced(sphere->mode, 0, sphere->count, inst_count);
+			}
+		}
+
+	public:
+		void update() {
+			for (auto& [handle, pass] : get_ctx()->iterate_components<basic_pass_t>()) {
+				auto* camera = pass.camera.get().get_component<camera_t>();
+				if (!camera) {
+					std::cerr << "missing camera component. handle: " << handle << " camera: " << pass.camera.get().get_handle() << std::endl;
+					continue;
+				}
+
+				auto* light = pass.light.get().get_component<omnidir_light_t>();
+				if (!light) {
+					std::cerr << "missing light component. handle: " << handle << " light: " << pass.light.get().get_handle() << std::endl;
+					continue;
+				}
+
+				render_pass_instanced(&pass, camera, light);
+			}
+		}
+
+	private:
+		resource_ptr_t<shader_program_t> program;
+		resource_ptr_t<shader_program_t> instanced_program;
+		resource_ptr_t<vertex_array_t> sphere;
+
+		std::unique_ptr<gpu_buffer_t> instance_buffer;
+		std::uint64_t m_offset{};
+		std::uint64_t m_size{};
+		glm::mat4* m{};
+		std::uint64_t object_mtl_offset{};
+		std::uint64_t object_mtl_size{};
+		std430_basic_material_t* object_mtl{};
+
+		bool submit_data = true;
+		int last_submitted{};
+	};
+
+
 	class window_system_t : public system_if_t {
 	public:
 		window_system_t(engine_ctx_t* ctx, int window_width, int window_height) : system_if_t(ctx) {
@@ -2114,7 +2477,7 @@ void main() {
 			window->make_ctx_current();
 			glew_guard = std::make_unique<glew_guard_t>();
 
-			if (GLEW_ARB_gpu_shader_int64) {
+			/*if (GLEW_ARB_gpu_shader_int64) {
 				if (glewGetExtension("GL_ARB_gpu_shader_int64")) {
 					std::cout << "we got 'GL_ARB_gpu_shader_int64'!\n";
 				} else {
@@ -2122,7 +2485,7 @@ void main() {
 				}
 			} else {
 				std::cerr << "shit...\n";
-			}
+			}*/
 		}
 
 		glfw::window_t& get_window() {
@@ -2162,19 +2525,32 @@ void main() {
 	}
 
 
+	// indices from range [-2^31 + 1, to 2^31 - 2]
+	constexpr int sparse_cell_base = 1 << 30;
+
 	using sparse_cell_t = glm::ivec3;
 
 	struct sparse_cell_hasher_t {
+		static std::uint32_t h32(std::uint32_t h) {
+			h ^= (h >> 16);
+			h *= 0x85ebca6b;
+			h ^= (h >> 13);
+			h *= 0xc2b2ae35;
+			h ^= (h >> 16);
+			return h;
+		}
+
 		std::uint32_t operator() (const sparse_cell_t& cell) const {
-			constexpr std::uint32_t a = 0xFFFFFABD;
-			constexpr std::uint32_t b = 0xFFFFF78B;
-			return (((std::uint32_t)cell.x * a + (std::uint32_t)cell.y) * a + (std::uint32_t)cell.z) * a + b;
+			std::uint32_t x = h32(cell.x);
+			std::uint32_t y = h32(cell.y);
+			std::uint32_t z = h32(cell.z);
+			return (x * 0xc2b2ae35 + y) * 0x85ebca6b + z;
 		}
 	};
 
-	struct uint32_hasher_t {
-		std::uint32_t operator() (std::uint32_t value) const {
-			return value; // TODO
+	struct sparse_cell_equals_t {
+		bool operator() (const sparse_cell_t& cell1, const sparse_cell_t& cell2) const {
+			return cell1 == cell2;
 		}
 	};
 
@@ -2332,159 +2708,331 @@ void main() {
 	sparse_data_iterator_t(__sparse_grid_t&, int) -> sparse_data_iterator_t<__sparse_grid_t>;
 
 
-	// TODO : fuck... me...
-	template<class __data_t>
-	struct hierarchical_sparse_grid_t {
-		using data_t = __data_t;
+	int nextlog2(int n) {
+		int power = 0;
+		int next = 1;
+		while (next < n) {
+			next <<= 1;
+			power++;
+		}
+		return power;
+	}
 
-		hierarchical_sparse_grid_t(float cell_size0, float cell_min0, float cell_max0) {}
+	int nextpow2(int n) {
+		int next = 1;
+		while (next < n) {
+			next <<= 1;
+		}
+		return next;
+	}
+
+	int log2size(int n) {
+		return 1 << n;
+	}
+
+	template<class>
+	struct callback_t;
+
+	template<class ret_t, class ... args_t>
+	struct callback_t<ret_t(args_t...)>{
+		template<class ctx_t>
+		using ctx_func_t = ret_t(ctx_t*, args_t...);
+
+		callback_t() = default;
+
+		template<class ctx_t>
+		callback_t(ctx_t& _ctx, ctx_func_t<ctx_t>* _func)
+			: ctx{&_ctx}
+			, func{(ctx_func_t<void>*)_func}
+		{}
+
+		template<class ctx_t>
+		callback_t(ctx_t* _ctx, ctx_func_t<ctx_t>* _func)
+			: ctx{_ctx}
+			, func{(ctx_func_t<void>*)_func}
+		{}
+
+		ret_t operator() (args_t ... args) const {
+			return func(ctx, std::forward<args_t>(args)...);
+		}
+
+		void* ctx{};
+		ctx_func_t<void>* func{};
 	};
 
+	using lofi_hasher_t = callback_t<std::uint32_t(int)>;
+	using lofi_equals_t = callback_t<bool(int, int)>;
 
-	template<class data_t, class hasher_t, class equals_t>
 	struct lofi_hashtable_t {
-		static int nextlog2(int n) {
-			int power = 0;
-			int next = 1;
-			while (next < n) {
-				next <<= 1;
-				power++;
-			}
-			return power;
-		}
+		static constexpr int inflation_coef = 2;
 
-		static int nextpow2(int) {
-			int next = 1;
-			while (next < n) {
-				next <<= 1;
+		struct bucket_t {
+			void reset() {
+				head.store(-1, std::memory_order_relaxed);
+				count.store(0, std::memory_order_relaxed);
 			}
-			return next;
-		}
 
-		static int log2size(int n) {
-			return 1 << n;
-		}
+			std::atomic<int> head{}; // default : -1
+			std::atomic<int> count{}; // default : 0
+		};
+
+		struct list_entry_t {
+			int next{};
+		};
 
 		lofi_hashtable_t(const lofi_hashtable_t&) = delete;
 		lofi_hashtable_t& operator= (const lofi_hashtable_t&) = delete;
 		lofi_hashtable_t(lofi_hashtable_t&&) noexcept = delete;
 		lofi_hashtable_t& operator= (lofi_hashtable_t&&) noexcept = delete;
 
-		template<class _hasher_t, class _equals_t>
-		lofi_hashtable_t(int _max_size, _hasher_t&& _hasher, _equals_t&& _equals)
-			: hasher{std::forward<_hasher_t>(_hasher)}
-			, equals{std::forward<_equals_t>(_equals)>}
-			, max_capacity{nextpow2(_max_size)}
+		lofi_hashtable_t(int _max_size, int dummy, lofi_hasher_t _hasher, lofi_equals_t _equals)
+			: hasher{_hasher}
+			, equals{_equals}
+			, max_capacity{nextpow2(_max_size) * inflation_coef}
 		{
-			buckets = std::make_unique<bucket_t[]>(max_capacity * 2));
-			used_buckets = std::make_unique<int[]>(max_capacity);
-			data_entries = std::make_unique<data_entry_t[]>(max_capacity);
+			buckets = std::make_unique<bucket_t[]>(max_capacity);
+			list_entries = std::make_unique<list_entry_t[]>(max_capacity / inflation_coef);
 		}
 
-		// stage 0: called from master-thread
-		void reset_size(int new_object_count) {
-			object_count = std::min(max_capacity, new_object_count);
-			capacity = std::min(max_capacity, nextpow2(new_object_count));
-			capacity_log2 = std::countr_zero(capacity);
-
-			used_buckets_count.store(0, std::memory_order_relaxed);
-			data_compacted_size.store(0, std::memory_order_relaxed);
+		// master
+		void reset_size(int new_object_count, int dummy) {
+			object_count = std::min(max_capacity / inflation_coef, new_object_count);
+			capacity_m1 = std::min(max_capacity, nextpow2(object_count) * inflation_coef) - 1;
+			capacity_log2 = std::countr_zero<unsigned>(capacity_m1 + 1);
 		}
 
-		// stage 1: can be called from multiple threads if they dont process the same data
-		void prepare_data(const data_t& data, int index) {
-			auto& entry = data_entries[index];
-			entry.next = index; // loop on self
-			entry.data = data;
+		// worker
+		// used by worker to reset the range of buckets
+		bucket_t* get_buckets_data(int start = 0) {
+			return buckets.get() + start;
 		}
 
-		// stage 1: can be called from multiple threads if they dont process the same data
-		void prepare_bucket(int index) {
-			auto& bucket = buckets[index];
-			bucket.head.store(-1, std::memory_order_relaxed);
-			bucket.count.store(0, std::memory_order_relaxed);
-		}
+		// worker
+		// returns either index of a bucket that was just used or -1 if it was already used
+		struct put_result_t {
+			int bucket_index{};
+			int scans{};
+		};
 
-		// stage 2: can be called from multiple threads if they dont process the same data
-		void put(int data_index) {
-			auto& data_entry = data_entries[data_index];
-			int bucket_index = get_bucket_index(hasher(data_entry.data));
+		put_result_t put(int item) {
+			int bucket_index = hash_to_index(hasher(item));
+			int scans = 1;
 			while (true) {
 				auto& bucket = buckets[bucket_index];
 
-				int head = bucket.head.load(std::memory_order_relaxed);
-				if (head == -1 && bucket.head.compare_exchange_strong(head, data_index, std::memory_order_seq_cst)) {
-					used_buckets[used_buckets_count.fetch_add(1, std::memory_order_relaxed)] = bucket_index;
+				int head_old = bucket.head.load(std::memory_order_relaxed);
+				if (head_old == -1 && bucket.head.compare_exchange_strong(head_old, item, std::memory_order_relaxed)) {
 					bucket.count.fetch_add(1, std::memory_order_relaxed);
-					break;
+					list_entries[item].next = item;
+					return {bucket_index, scans};
 				}
-				if (equals(data_entries[head].data, data_entry)) { // totaly legit to use possibly invalid head here
-					data_entry.next = bucket.head.exchange(data_index, std::memory_order_seq_cst); // head can be invalid
+				if (equals(head_old, item)) { // totaly legit to use possibly invalid head here
 					bucket.count.fetch_add(1, std::memory_order_relaxed);
-					break;
+					list_entries[item].next = bucket.head.exchange(item, std::memory_order_relaxed); // head can be invalid
+					return {-1, scans};
 				}
 
-				bucket_index = (bucket_index + 1) & (capacity - 1);
+				bucket_index = (bucket_index + 1) & capacity_m1;
+				scans++;
 			}
 		}
 
-		// stage 3: process and enjoy
+
+		// worker & master
 		const bucket_t& get_bucket(int index) const {
-			return buckets[used_buckets[index]];
+			return buckets[index];
 		}
 
-		const bucket_t& get(const data_t& data) const {
-			return buckets[get_bucket_index(hasher(data))];
+		const bucket_t& get(int item) const {
+			return buckets[hash_to_index(hasher(item))];
 		}
 
-		int get_used_buckets_count() const {
-			return used_buckets_count.load(std::memory_order_relaxed);
+		int hash_to_index(std::uint32_t hash) const {
+			return ((hash >> capacity_log2) + hash) & capacity_m1; // add upper bits to lower
 		}
 
-
-		int get_bucket_index(std::uint32_t hash) const {
-			return ((hash >> capacity_log2) + hash) & (capacity - 1); // add upper bits to lower
+		int get_buckets_count() const {
+			return capacity_m1 + 1;
 		}
 
-		int get_buckets_size() const {
-			return capacity * 2;
-		}
-
-		int get_data_entries_size() const {
+		int get_object_count() const {
 			return object_count;
 		}
 
 
+		int capacity_m1{};
+		int capacity_log2{};
+
+		lofi_hasher_t hasher;
+		lofi_equals_t equals;
+
+		std::unique_ptr<bucket_t[]> buckets; // resized to capacity (increased capacity to decrease contention)
+		std::unique_ptr<list_entry_t[]> list_entries; // size = object_count
+	
+		const int max_capacity;
+		int object_count{};
+	};
+
+	struct lofi_hashtable1_t {
+		static constexpr int scans_force_insert = 32;
+		static constexpr int scans_force_insert_m1 = scans_force_insert - 1;
+		
+		static constexpr int inflation_coef = 4;
+
+		static int hash_to_offset(std::uint32_t hash) {
+			return (hash * 0x85ebca6b + (hash >> 17)) & scans_force_insert_m1;
+		}
+
 		struct bucket_t {
+			void reset() {
+				head.store(-1, std::memory_order_relaxed);
+				count.store(0, std::memory_order_relaxed);
+			}
+
 			std::atomic<int> head{}; // default : -1
 			std::atomic<int> count{}; // default : 0
 		};
 
-		struct data_entry_t {
+		struct list_entry_t {
 			int next{};
-			data_t data{};
 		};
 
-		hasher_t hasher;
-		equals_t equals;
-		const int max_capacity;
+		lofi_hashtable1_t(const lofi_hashtable1_t&) = delete;
+		lofi_hashtable1_t& operator= (const lofi_hashtable1_t&) = delete;
+		lofi_hashtable1_t(lofi_hashtable1_t&&) noexcept = delete;
+		lofi_hashtable1_t& operator= (lofi_hashtable1_t&&) noexcept = delete;
 
-		std::unique_ptr<bucket_t[]> buckets; // resized to capacity * 2 (increased capacity to decrease contention)
+		lofi_hashtable1_t(int _max_object_count, int _max_bucket_count, lofi_hasher_t _hasher, lofi_equals_t _equals)
+			: max_object_count{_max_object_count}
+			, max_bucket_count{inflation_coef * nextpow2(_max_bucket_count)}
+			, hasher{_hasher}
+			, equals{_equals}
+		{
+			buckets = std::make_unique<bucket_t[]>(max_bucket_count);
+			list_entries = std::make_unique<list_entry_t[]>(max_object_count);
+		}
 
-		std::unique_ptr<int[]> used_buckets; // size = object_count
-		std::atomic<int> used_buckets_count{};
+		// master
+		void reset_size(int new_object_count, int new_bucket_count) {
+			object_count = std::min(max_object_count, new_object_count);
+			bucket_count_m1 = std::min(max_bucket_count, inflation_coef * nextpow2(new_bucket_count)) - 1;
+			bucket_count_log2 = std::countr_zero<unsigned>(bucket_count_m1 + 1);
+		}
 
-		std::unique_ptr<data_entry_t[]> data_entries; // size = object_count
-	
+		// worker
+		// used by worker to reset the range of buckets
+		bucket_t* get_buckets_data(int start = 0) {
+			return buckets.get() + start;
+		}
+
+		// worker
+		// returns either index of a bucket that was just used or -1 if it was already used
+		struct put_result_t {
+			int bucket_index{};
+			int scans{};
+		};
+
+		put_result_t put(int item) {
+			std::uint32_t hash = hasher(item);
+
+			// main insertion attempts
+			int bucket_index = hash_to_index(hash);
+			int scans = 1;
+			while (scans <= scans_force_insert) {
+				auto& bucket = buckets[bucket_index];
+
+				int head_old = bucket.head.load(std::memory_order_relaxed);
+				if (head_old == -1 && bucket.head.compare_exchange_strong(head_old, item, std::memory_order_relaxed)) {
+					bucket.count.fetch_add(1, std::memory_order_relaxed);
+					list_entries[item].next = item;
+					return {bucket_index, scans};
+				}
+				if (equals(head_old, item)) { // totaly legit to use possibly invalid head here
+					bucket.count.fetch_add(1, std::memory_order_relaxed);
+					list_entries[item].next = bucket.head.exchange(item, std::memory_order_relaxed); // head can be invalid
+					return {-1, scans};
+				}
+
+				bucket_index = (bucket_index + 1) & bucket_count_m1;
+				scans++;
+			}
+
+			// forcing insertion, allows collision
+			auto& bucket = buckets[(hash_to_index(hash) + hash_to_offset(hash)) & bucket_count_m1];
+			bucket.count.fetch_add(1, std::memory_order_relaxed);
+			list_entries[item].next = bucket.head.exchange(item, std::memory_order_relaxed);
+			return {-1, scans_force_insert + 1};
+		}
+
+
+		// worker & master
+		const bucket_t& get_bucket(int index) const {
+			return buckets[index];
+		}
+
+		const bucket_t& get(int item) const {
+			return buckets[hash_to_index(hasher(item))];
+		}
+
+		int hash_to_index(std::uint32_t hash) const {
+			return ((hash >> bucket_count_log2) + hash) & bucket_count_m1; // add upper bits to lower
+		}
+
+		int get_buckets_count() const {
+			return bucket_count_m1 + 1;
+		}
+
+		int get_object_count() const {
+			return object_count;
+		}
+
 		int object_count{};
-		int capacity{};
-		int capacity_log2{};
+		int bucket_count_m1{};
+		int bucket_count_log2{};
+
+		lofi_hasher_t hasher;
+		lofi_equals_t equals;
+
+		std::unique_ptr<bucket_t[]> buckets; // resized to capacity (increased capacity to decrease contention)
+		std::unique_ptr<list_entry_t[]> list_entries; // size = object_count
+
+		const int max_object_count;
+		const int max_bucket_count;
 	};
 
+	template<class data_t>
+	struct lofi_stack_t {
+		lofi_stack_t(int _max_size)
+			: max_size{_max_size} {
+			data = std::make_unique<data_t[]>(max_size);
+		}
 
-	// TODO : lofi_stack_t
+		// master
+		void reset() {
+			size.store(0, std::memory_order_relaxed);
+		}
 
-	// TODO : lofi_heavy_cell_iter_t
+		// worker
+		data_t* push(int count) {
+			int start = size.fetch_add(count, std::memory_order_relaxed);
+			assert(start + count <= max_size);
+			return data.get() + start;
+		}
+
+		// worker
+		data_t* get_data(int start) {
+			return data.get() + start;
+		}
+
+		int get_size() const {
+			return size.load(std::memory_order_relaxed);
+		}
+
+		const int max_size;
+		std::unique_ptr<data_t[]> data;
+		std::atomic<int> size{};
+	};
+
 
 	// point attractor
 	// a = GM / |r - r0|^2 * (r - r0) / |r - r0|
@@ -2565,6 +3113,7 @@ void main() {
 					if (ImGui::SliderFloat("##o2o", &o2o, 0.0f, 500.0f, "o2o %.2f")) {
 						set_o2o(o2o);
 					}
+					ImGui::Checkbox("enable", &enabled);
 				}
 				ImGui::End();
 				return true;
@@ -2666,20 +3215,6 @@ void main() {
 				}
 			}
 			return acc;
-
-			/*for (int i = 0; i < cached_components.size(); i++) {
-				if (i != index) {
-					physics_t* physics_i = cached_components[i];
-					glm::vec3 dr = physics->pos - physics_i->pos;
-					float r = glm::length(dr);
-					if (r <= 1e-6) {
-						continue;
-					}
-					float r0 = physics->radius + physics_i->radius;
-					acc += o2o * std::clamp(r0 - r, 0.0f, r0) * (dr / r);
-				}
-			}*/
-			return acc;
 		}
 
 		// simplification, compute acceleration beforehand
@@ -2715,6 +3250,10 @@ void main() {
 		}
 
 		void update_physics() {
+			if (!enabled) {
+				return;
+			}
+
 			for (int i = 0; i < total_objects; i++) {
 				auto& physics = *cached_components[i];
 				auto& updated = integrator_updates[i];
@@ -2766,6 +3305,8 @@ void main() {
 		float o2o{};
 		int dt_split{};
 
+		bool enabled{true};
+
 		int frame{};
 		std::size_t total_objects{};
 		std::vector<physics_t*> cached_components;
@@ -2781,6 +3322,18 @@ void main() {
 	seed_t shuffle(seed_t value) {
 		return std::rotl(value, 17) * 0x123456789ABCDEF0 + std::rotr(value, 17);
 	}
+
+	class basic_int_gen_t {
+	public:
+		basic_int_gen_t(seed_t seed) : base_gen(seed) {}
+
+		int gen() {
+			return base_gen();
+		}
+
+	private:
+		std::minstd_rand base_gen;
+	};
 
 	class int_gen_t {
 	public:
@@ -2908,10 +3461,6 @@ void main() {
 	};
 
 
-	struct level_system_info_t {
-		// TODO : whatever configuration
-	};
-
 	void sync_attractor_components(entity_t entity) {
 		auto* attractor = entity.get_component<attractor_t>();
 		if (!attractor) {
@@ -2950,13 +3499,22 @@ void main() {
 		transform->translation = physics->pos;
 	}
 
+	struct level_system_info_t {
+		int balls_count{};
+	};
+
 	class level_system_t : public system_if_t {
-		void scatter_balls() {
+		void scatter_balls(int start = -1, int end = -1) {
+			start = start != -1 ? start : 0;
+			end = end != -1 ? end : ball_handles.size();
+
 			auto* ctx = get_ctx();
 
 			float_gen_t coord_gen(42, -30.0f, +30.0f);
 			float_gen_t vel_gen(42, -1.0f, +1.0f);
-			for (auto handle : ball_handles) {
+			for (int i = start; i < end; i++) {
+				auto handle = ball_handles[i];
+
 				float rx = coord_gen.gen(), ry = coord_gen.gen(), rz = coord_gen.gen();
 				float vx = vel_gen.gen(), vy = vel_gen.gen(), vz = vel_gen.gen();
 
@@ -2968,68 +3526,8 @@ void main() {
 			}
 		}
 
-		inline static const glm::vec3 SPHERE_XYZ = glm::vec3(0.0f);
-		inline static const float SPHERE_R = 5.0f;
-
-		glm::vec3 __yin_yang(const glm::vec3& pos) {
-			glm::vec3 p = (pos - SPHERE_XYZ) / SPHERE_R;
-
-			if (p.z <= 0.0f) {
-				p.y = -p.y;
-			}
-
-			float x = p.x, y = p.y, z = p.z;
-			if (std::sqrt((x + 0.5f) * (x + 0.5f) + y * y) < 0.2f) {
-				return glm::vec3(1.0f);
-			}
-
-			if (std::sqrt((x - 0.5f) * (x - 0.5f) + y * y) < 0.2f) {
-				return glm::vec3(0.0f);
-			}
-
-			if (x < -1.0f) {
-				if (y < 0.0f) {
-					return glm::vec3(0.0f);
-				}
-				return glm::vec3(1.0f);
-			}
-
-			if (x <= 0.0f) {
-				if (std::sqrt(std::abs(0.5f * 0.5f - (x + 0.5f) * (x + 0.5f))) >= y) {
-					return glm::vec3(0.0f);
-				}
-				return glm::vec3(1.0f);
-			}
-
-			if (x <= 1.0f) {
-				if (-std::sqrt(std::abs(0.5f * 0.5f - (x - 0.5f) * (x - 0.5f))) >= y) {
-					return glm::vec3(0.0f);
-				}
-				return glm::vec3(1.0f);
-			}
-
-			if (y <= 0.0f) {
-				return glm::vec3(0.0f);
-			}
-			return glm::vec3(1.0f);
-		}
-
-		glm::vec3 yin_yang(glm::vec3 pos, float r) {
-			return __yin_yang(pos + glm::normalize(pos - SPHERE_XYZ) * r);
-		}
-
-		void do_yin_yang() {
-			auto* ctx = get_ctx();
-			for (auto handle : ball_handles) {
-				entity_t ball{ctx, handle};
-				auto* material = ball.get_component<basic_material_t>();
-				auto* physics = ball.get_component<physics_t>();
-				material->color = yin_yang(physics->pos, physics->radius);
-			}
-		}
-
-		void init_balls() {
-			float r = 0.5f;
+		void spawn_balls(int count) {
+			float r = 0.2f;
 
 			transform_t transform = {
 				.base = glm::mat4(1.0f),
@@ -3049,14 +3547,10 @@ void main() {
 				.color = glm::vec3(1.0f, 1.0f, 1.0f),
 				.specular_strength = 1.0f,
 				.shininess = 64.0f,
-				.vao = get_ctx()->get_resource_ref<vertex_array_t>("sphere")
 			};
 
 			hsv_to_rgb_color_gen_t color_gen(42);
 
-			int count = 5000;
-
-			ball_handles.clear();
 			for (int i = 0; i < count; i++) {
 				material.color = color_gen.gen();
 
@@ -3071,8 +3565,8 @@ void main() {
 		}
 
 		void create_balls() {
-			init_balls();
-			scatter_balls();
+			spawn_balls(balls_count);
+			scatter_balls(0, balls_count);
 		}
 
 		void create_attractors() {
@@ -3087,19 +3581,19 @@ void main() {
 				.pos = glm::vec3(0.0f, 0.0f, 0.0f),
 				.vel = glm::vec3(0.0f, 0.0f, 0.0f),
 				.mass = 1.0f,
-				.radius = SPHERE_R,
+				.radius = 5.0f,
 				.no_update = true,
 			};
 
 			attractor_t attractor = {
 				.pos = glm::vec3(0.0f),
 				.gm = 500.0f,
-				.min_dist = SPHERE_R,
+				.min_dist = 5.0f,
 				.max_dist = 200.0f,
-				.drag_min_coef = 0.5f,
-				.drag_max_coef = 0.5f,
-				.drag_min_dist = SPHERE_R * 0.5f,
-				.drag_max_dist = SPHERE_R * 2.0f,
+				.drag_min_coef = 0.0f,
+				.drag_max_coef = 0.0f,
+				.drag_min_dist = 2.0f,
+				.drag_max_dist = 7.0f,
 			};
 
 			basic_material_t material = {
@@ -3122,8 +3616,8 @@ void main() {
 		void create_light() {
 			omnidir_light_t light = {
 				.ambient = glm::vec3(0.2f),
-				.color = glm::vec3(1.0f),
-				.pos = glm::vec3(5.0f),
+				.color = glm::vec3(10.0f),
+				.pos = glm::vec3(10.0f),
 			};
 
 			entity_t object(get_ctx());
@@ -3204,18 +3698,20 @@ void main() {
 			return true;
 		}
 
-		bool enable_yy{};
-
 		bool level_control_gui() {
 			if (ImGui::Begin("level: controls")) {
+				ImGui::Text("balls: %d", (int)ball_handles.size());
 				if (ImGui::Button("scatter")) {
 					scatter_balls();
 				}
+				ImGui::SetNextItemWidth(100.0f);
+				ImGui::InputInt("##balls_to_spawn", &balls_count_gui);
 				ImGui::SameLine();
-				if (ImGui::Button("yin-yang")) {
-					do_yin_yang();
+				if (ImGui::Button("spawn balls")) {
+					int start = ball_handles.size();
+					spawn_balls(balls_count_gui);
+					scatter_balls(start);
 				}
-				ImGui::Checkbox("enable yy", &enable_yy);
 			}
 			ImGui::End();
 			return true;
@@ -3236,7 +3732,9 @@ void main() {
 		}
 
 	public:
-		level_system_t(engine_ctx_t* ctx) : system_if_t(ctx) {
+		level_system_t(engine_ctx_t* ctx, const level_system_info_t& info)
+			: system_if_t(ctx)
+			, balls_count{info.balls_count} {
 			create_balls();
 			create_attractors();
 			create_light();
@@ -3265,10 +3763,7 @@ void main() {
 			float t = glfw::get_time() * 0.4f;
 			entity_t viewer{get_ctx(), viewer_handle};
 			auto* camera = viewer.get_component<camera_t>();
-			camera->eye = glm::vec3(12.0f * std::cos(t), 5.0f * std::sin(t * 2.0f), 12.0f * std::sin(t));
-			if (enable_yy) {
-				do_yin_yang();
-			}
+			camera->eye = glm::vec3(30.0f * std::cos(t), 10.0f * std::sin(t * 1.0f), 30.0f * std::sin(t));
 		}
 
 	private:
@@ -3278,6 +3773,8 @@ void main() {
 		handle_t viewer_handle{};
 		handle_t basic_pass_handle{};
 		handle_t imgui_pass_handle{};
+		int balls_count{};
+		int balls_count_gui{};
 
 		resource_ptr_t<texture_t> framebuffer_texture{};
 	};
@@ -3292,10 +3789,10 @@ void main() {
 	class mainloop_t : public mainloop_if_t {
 	public:
 		mainloop_t(engine_ctx_t* _ctx) : ctx{_ctx} {
-			constexpr int window_width = 1280;
-			constexpr int window_height = 720;
-			constexpr int tex_width = 512;
-			constexpr int tex_height = 512;
+			constexpr int window_width = 1600;
+			constexpr int window_height = 800;
+			constexpr int tex_width = 1280;
+			constexpr int tex_height = 720;
 
 			physics_system_info_t physics_system_info{
 				.eps = 1e-6f,
@@ -3305,11 +3802,18 @@ void main() {
 				.velocity_limit = 300.0f,
 				.impact_cor = 0.8f,
 				.impact_v_loss = 0.99f,
-				.dt_split = 8,
+				.dt_split = 4,
+			};
+
+			level_system_info_t level_info{
+				.balls_count = 10000,
 			};
 
 			window_system = std::make_shared<window_system_t>(ctx, window_width, window_height);
 			ctx->add_system("window", window_system);
+
+			imgui_system = std::make_shared<imgui_system_t>(ctx, window_system->get_window().get_handle(), "#version 460 core");
+			ctx->add_system("imgui", imgui_system);
 
 			basic_resources_system = std::make_shared<basic_resources_system_t>(ctx, tex_width, tex_height);
 			ctx->add_system("basic_resources", basic_resources_system);
@@ -3317,16 +3821,13 @@ void main() {
 			basic_renderer_system = std::make_shared<basic_renderer_system_t>(ctx);
 			ctx->add_system("basic_renderer", basic_renderer_system);
 
-			imgui_system = std::make_shared<imgui_system_t>(ctx, window_system->get_window().get_handle(), "#version 460 core");
-			ctx->add_system("imgui", imgui_system);
-
 			physics_system = std::make_shared<physics_system_t>(ctx, physics_system_info);
 			ctx->add_system("physics", physics_system);
 
 			timer_system = std::make_shared<timer_system_t>(ctx);
 			ctx->add_system("timer", timer_system);
 
-			level_system = std::make_shared<level_system_t>(ctx);
+			level_system = std::make_shared<level_system_t>(ctx, level_info);
 			ctx->add_system("level", level_system);
 
 			sync_component_system = std::make_shared<sync_component_system_t>(ctx);
@@ -3351,14 +3852,14 @@ void main() {
 			ctx->remove_system("physics");
 			physics_system.reset();
 
-			ctx->remove_system("imgui");
-			imgui_system.reset();
-
 			ctx->remove_system("basic_renderer");
 			basic_renderer_system.reset();
 
 			ctx->remove_system("basic_resources");
 			basic_resources_system.reset();
+
+			ctx->remove_system("imgui");
+			imgui_system.reset();
 
 			ctx->remove_system("window");
 			window_system.reset();
@@ -3373,7 +3874,9 @@ void main() {
 			auto& timer = *timer_system;
 			auto& level = *level_system;
 
-			float dt = 0.020f;
+			float dt = 0.008f;
+
+			glfwSwapInterval(0);
 			while (!window.should_close()) {
 				window.swap_buffers();
 
@@ -3417,25 +3920,59 @@ void main() {
 		std::unique_ptr<mainloop_if_t> mainloop;
 	};
 
+	// TODO : component iterate method
+	// TODO : replace hashtable with vector like in entt
+	// TODO : simplify hash function
+	// TODO : test lofi_hashtable
+	// TODO : thread pool
+	// TODO : job
+	// TODO : mutltithreaded physics update
+	// TODO : multithreaded render data submission
+	// TODO : script_system
+	// TODO : simple timer system
 	// TODO : ball_spawner_system_t
-	// TODO : fancy_attractor_system_t
 	
-	// TODO : logging
-
-	// TODO : advanced physics
-	// TODO : octotree
-	// TODO : multithreaded update
-
-	// TODO : vulkan
-	// TODO : completely rework rendering system
-	// TODO : debug renderer
-	// TODO : advanced drawing
-	// TODO : instanced rendering of my BALLS
-
-	// TODO : whatever TODO you see
+	///...
 
 	// TODO : point of no return - next iteration
 }
+
+
+struct int_iter_t {
+	int operator* () const {
+		return value;
+	}
+
+	bool operator== (int_iter_t iter) const {
+		return value == iter.value;
+	}
+
+	int_iter_t& operator++ () {
+		return value++, * this;
+	}
+
+	int_iter_t operator++ (int) {
+		return int_iter_t{value++};
+	}
+
+	int_iter_t& operator-- () {
+		return value--, * this;
+	}
+
+	int_iter_t operator-- (int) {
+		return int_iter_t{value--};
+	}
+
+	int value{};
+};
+
+struct int_iter_range_t {
+	int_iter_t begin() const { return {range_start}; }
+	int_iter_t end() const { return {range_end}; }
+
+	int range_start{};
+	int range_end{};
+};
 
 
 // some pile of shit (tests)
@@ -3499,26 +4036,15 @@ void test_sparse_grid_hash() {
 	auto hash = sparse_cell_hasher_t{};
 
 	std::unordered_map<std::uint32_t, std::uint32_t> hash_count;
-	for (int i = -1000; i < 1000; i += 11) {
-		for (int j = -1000; j < 1000; j += 11) {
-			for (int k = -1000; k < 1000; k += 11) {
-				hash_count[hash(sparse_cell_t{i, j, k})]++;
-			}
-		}
-	}
-
-	for (int i = -1000000; i < 1000000; i++) {
-		hash_count[hash(sparse_cell_t{i, 0, 0})]++;
-		hash_count[hash(sparse_cell_t{0, i, 0})]++;
-		hash_count[hash(sparse_cell_t{0, 0, i})]++;
-	}
-
-	for (int i = -1000; i < 1000; i++) {
-		for (int j = -1000; j < 1000; j++) {
-			hash_count[hash(sparse_cell_t{i, j, 0})]++;
-			hash_count[hash(sparse_cell_t{i, 0, j})]++;
-			hash_count[hash(sparse_cell_t{0, i, j})]++;
-		}
+	int_gen_t x(41, -100000000, 100000000);
+	int_gen_t y(42, -100000000, 100000000);
+	int_gen_t z(43, -100000000, 100000000);
+	for (int i = 0; i < 100000000; i++) {
+		auto h = hash(sparse_cell_t{x.gen(), y.gen(), z.gen()});
+		// h = ((h >> 9) + h) & ((1 << 23) - 1);
+		// h = ((h >> 10) + h) & ((1 << 22) - 1);
+		h %= 200000081;
+		hash_count[h]++;
 	}
 
 	std::uint32_t min_count = ~0;
@@ -3542,7 +4068,7 @@ void test_sparse_grid() {
 		for (sparse_data_iterator_t iter{grid, head}; iter.valid(); iter.next()) {
 			std::cout << iter.get().data << " ";
 		}
-	};
+		};
 
 	sparse_grid_t<int> grid(2.0f, -100000, 100000);
 	for (int i = 0; i < 4; i++) {
@@ -3569,7 +4095,7 @@ void test_sparse_grid() {
 			std::cout << "\n";
 		}
 		std::cout << "\n";
-	};
+		};
 
 	std::vector<sparse_query_result_t> result;
 
@@ -3585,12 +4111,409 @@ void test_sparse_grid() {
 	assert_check(result.empty(), "result is not empty");
 }
 
+void test_thread_pool1() {
+	struct some_job_t : public job_if_t {
+		some_job_t() = default;
+
+		some_job_t(int _start, int _end)
+			: start{_start}
+			, end{_end}
+		{}
+
+		some_job_t(const some_job_t&) = delete;
+		some_job_t& operator=(const some_job_t&) = delete;
+
+		some_job_t(some_job_t&&) noexcept = delete;
+		some_job_t& operator=(some_job_t&&) noexcept = delete;
+
+		void execute() override {
+			for (int i = start; i < end; i++) {
+				result += i;
+			}
+		}
+
+		int start{};
+		int end{};
+		std::int64_t result{};
+	};
+
+	thread_pool_t pool(24);
+	std::vector<std::unique_ptr<some_job_t>> jobs;
+	for (int i = 0; i < 24; i++) {
+		jobs.push_back(std::make_unique<some_job_t>(0, 1 << 29));
+	}
+
+	for (auto& job : jobs) {
+		pool.push_job(job.get());
+	}
+
+	for (auto& job : jobs) {
+		job->wait();
+	}
+
+	for (int i = 0; i < 24; i++) {
+		auto& job = *jobs[i];
+		std::cout << "job " << i << " start: " << job.start << " end: " << job.end << " result: " << job.result << "\n";
+	}
+}
+
+void test_thread_pool2() {
+	struct job_t : public job_if_t {
+		job_t(std::atomic<int>* _swapped_number, int _number, int _swaps)
+			: swapped_number{_swapped_number}
+			, number{_number}
+			, swaps{_swaps}
+		{}
+
+		void execute() override {
+			for (int i = 0; i < swaps; i++) {
+				number = swapped_number->exchange(number, std::memory_order_relaxed);
+			}
+		}
+
+		std::atomic<int>* swapped_number{};
+		int number{};
+		int swaps{};
+	};
+
+	thread_pool_t pool(24);
+	std::atomic<int> swapped_number{24};
+	std::vector<std::unique_ptr<job_t>> jobs;
+	for (int i = 0; i < 24; i++) {
+		jobs.push_back(std::make_unique<job_t>(&swapped_number, i, 1 << 20));
+	}
+
+	for (auto& job : jobs) {
+		pool.push_job(job.get());
+	}
+
+	for (auto& job : jobs) {
+		job->wait();
+	}
+
+	std::cout << "swapped_number: " << swapped_number.load(std::memory_order_relaxed) << "\n";
+	for (int i = 0; i < 24; i++) {
+		std::cout << "job " << i << ": " << jobs[i]->number << "\n";
+	}
+}
+
+void test_callback() {
+	struct some_struct_t {
+		static void callback(some_struct_t* ctx, int num) {
+			auto* this_ptr = (some_struct_t*)ctx;
+			std::cout << this_ptr->term + num << "\n";
+		}
+
+		int term{};
+	};
+
+	some_struct_t whatever{5};
+	callback_t<void(int)> cb{whatever, some_struct_t::callback};
+	cb(5);
+}
+
+struct job_range_t {
+	int start{};
+	int stop{};
+};
+
+static job_range_t compute_job_range(int job_size, int job_count, int job_id) {
+	int job_part = (job_size + job_count - 1) / job_count;
+	int job_start = std::min(job_id * job_part, job_size);
+	int job_stop = std::min(job_start + job_part, job_size);
+	return {job_start, job_stop};
+}
+
+template<class type_t>
+struct data_range_t {
+	type_t* start{};
+	type_t* stop{};
+};
+
+template<class type_t>
+static data_range_t<type_t> compute_data_range(type_t* data, int job_size, int job_count, int job_id) {
+	auto [start, stop] = compute_job_range(job_size, job_count, job_id);
+	return {data + start, data + stop};
+}
+
+template<class type_t>
+void shuffle_vec(std::vector<type_t>& vec, seed_t seed = 0) {
+	if (vec.empty()) {
+		return;
+	}
+
+	basic_int_gen_t gen(seed);
+	for (int i = vec.size() - 1; i > 0; i--) {
+		std::swap(vec[i], vec[gen.gen() % i]);
+	}
+}
+
+void test_lofi_hashtable() {
+	struct ctx_t {
+		using std_hashtable_t = std::unordered_multiset<sparse_cell_t, sparse_cell_hasher_t, sparse_cell_equals_t>;
+
+		struct job_t : public job_if_t {
+			job_t(ctx_t* _ctx, int _job_id)
+				: ctx{_ctx}
+				, job_id{_job_id}
+			{}
+
+			void execute() override {
+				ctx->worker(this);
+			}
+
+			ctx_t* ctx{};
+			int job_id{};
+			int max_scans{};
+			int total_scans{};
+		};
+
+		enum process_stage_t {
+			HashtableReset,
+			PrepareHashtable,
+			BuildHashtable,
+			BuildStdHashtable,
+		};
+
+		static std::uint32_t hash(ctx_t* ctx, int cell) {
+			return sparse_cell_hasher_t{}(ctx->cells[cell]);
+		}
+
+		static bool equals(ctx_t* ctx, int cell1, int cell2) {
+			return ctx->cells[cell1] == ctx->cells[cell2];
+		}
+
+		ctx_t(int _cell_count, int _repeat, int _job_count, bool should_shuffle = false)
+			: cell_count{_cell_count}
+			, repeat{_repeat}
+			, job_count{_job_count}
+			, total_cell_count{cell_count * repeat}
+			, hashtable{total_cell_count, cell_count, lofi_hasher_t{this, hash}, lofi_equals_t{this, equals}}
+			, used_buckets{total_cell_count}
+			, thread_pool{job_count} {
+
+			int_gen_t x_gen(561, -40000, 50000);
+			int_gen_t y_gen(1442, -40000, 50000);
+			int_gen_t z_gen(105001, -40000, 50000);
+
+			cells.reserve(total_cell_count);
+			for (int i = 0; i < cell_count; i++) {
+				int x = x_gen.gen();
+				int y = y_gen.gen();
+				int z = z_gen.gen();
+				for (int k = 0; k < repeat; k++) {
+					cells.push_back(sparse_cell_t{x, y, z});
+				}
+			}
+
+			if (should_shuffle) {
+				shuffle_vec(cells, 666);
+			}
+
+			jobs.reserve(job_count);
+			for (int i = 0; i < job_count; i++) {
+				jobs.push_back(std::make_unique<job_t>(this, i));
+			}
+
+			std_hashtable.reserve(total_cell_count);
+		}
+
+		int master() {
+			auto t1 = std::chrono::high_resolution_clock::now();
+
+			hashtable.reset_size(total_cell_count, cell_count);
+			used_buckets.reset();
+
+			stage = process_stage_t::PrepareHashtable;
+			dispatch_jobs();
+
+			auto t2 = std::chrono::high_resolution_clock::now();
+
+			stage = process_stage_t::BuildHashtable;
+			dispatch_jobs();
+
+			auto t3 = std::chrono::high_resolution_clock::now();
+
+			stage = process_stage_t::BuildStdHashtable;
+			dispatch_jobs();
+
+			auto t4 = std::chrono::high_resolution_clock::now();
+
+
+			using microseconds_t = std::chrono::duration<long long, std::micro>;
+
+			auto dt21 = std::chrono::duration_cast<microseconds_t>(t2 - t1).count();
+			auto dt32 = std::chrono::duration_cast<microseconds_t>(t3 - t2).count();
+			auto dt43 = std::chrono::duration_cast<microseconds_t>(t4 - t3).count();
+
+			std::cout << " ---=== in microseconds ===---" << "\n";
+			std::cout << "lofi: " << dt32 + dt21 << " = " << dt32 << " + " << dt21 << "\n";
+			std::cout << "std: " << dt43 << "\n";
+
+			int max_count = 0;
+			int inserted = 0;
+			for (int i = 0; i < hashtable.get_buckets_count(); i++) {
+				int count = hashtable.get_bucket(i).count.load(std::memory_order_relaxed);
+				max_count = std::max(max_count, count);
+				inserted += count;
+			}
+
+			int max_scans = 0;
+			int total_scans = 0;
+			for (auto& job : jobs) {
+				max_scans = std::max(max_scans, job->max_scans);
+				total_scans += job->total_scans;
+			}
+
+			std::cout << "max count: " << max_count << "\n";
+			std::cout << "max scans: " << max_scans << "\n";
+			std::cout << "total scans: " << total_scans << "\n";
+			std::cout << "avg scans: " << (double)total_scans / total_cell_count << "\n";
+			std::cout << "inserted: " << inserted << "\n";
+			std::cout << "used buckets: " << used_buckets.get_size() << "\n";
+			std::cout << "hashtable valid: " << check_lofi_hashtable() << "\n";
+
+			return dt32 + dt21;
+		}
+
+		bool check_lofi_hashtable() {
+			int added_count = 0;
+			std::vector<bool> cell_added(total_cell_count);
+
+			for (int i = 0, count = used_buckets.get_size(); i < count; i++) {
+				auto& bucket = hashtable.get_bucket(used_buckets.data[i]);
+
+				int curr = bucket.head.load(std::memory_order_relaxed);
+				if (curr == -1) {
+					return false;
+				}
+				while (true) {
+					if (cell_added[curr]) {
+						return false;
+					}
+					cell_added[curr] = true;
+					added_count++;
+
+					int next = hashtable.list_entries[curr].next;
+					if (next == curr) {
+						break;
+					}
+					curr = next;
+				}
+			}
+
+			return added_count == total_cell_count;
+		}
+
+		void worker(job_t* job) {
+			switch (stage) {
+				// prepare
+				case PrepareHashtable: {
+					auto [start, stop] = compute_data_range(hashtable.get_buckets_data(), hashtable.get_buckets_count(), job_count, job->job_id);
+					while (start != stop) {
+						start->reset();
+						start++;
+					}
+					break;
+				}
+
+				// put
+				case BuildHashtable: {
+					constexpr int batch_size = 128;
+
+					int buckets[batch_size] = {};
+					int buckets_count = 0;
+					int max_scans = 0;
+					int total_scans = 0;
+
+					auto [start, stop] = compute_job_range(hashtable.get_object_count(), job_count, job->job_id);
+					while (start != stop) {
+						buckets_count = 0;
+
+						int next_stop = std::min(stop, start + batch_size);
+						while (start != next_stop) {
+							auto [bucket, scans] = hashtable.put(start);
+							if (bucket != -1) {
+								buckets[buckets_count++] = bucket;
+							}
+							max_scans = std::max(max_scans, scans);
+							total_scans += scans;
+							start++;
+						}
+
+						if (buckets_count > 0) {
+							int* used_buckets_mem = used_buckets.push(buckets_count);
+							assert(used_buckets_mem);
+							std::memcpy(used_buckets_mem, buckets, sizeof(buckets[0]) * buckets_count);
+						}
+					}
+
+					job->max_scans = max_scans;
+					job->total_scans = total_scans;
+					break;
+				}
+
+				// std
+				case BuildStdHashtable: {
+					if (job->job_id == -1) {
+						auto [start, stop] = compute_job_range(hashtable.get_object_count(), 1, 0);
+						while (start != stop) {
+							std_hashtable.insert(cells[start++]);
+						}
+					}
+					break;
+				}
+			}
+		}
+
+		void dispatch_jobs() {
+			for (auto& job : jobs) {
+				thread_pool.push_job(job.get());
+			}
+			for (auto& job : jobs) {
+				job->wait();
+			}
+		}
+
+		int cell_count{};
+		int repeat{};
+		int job_count{};
+		int total_cell_count{};
+
+		std::vector<sparse_cell_t> cells{};
+		lofi_hashtable1_t hashtable;
+		lofi_stack_t<int> used_buckets;
+
+		thread_pool_t thread_pool;
+		std::vector<std::unique_ptr<job_t>> jobs;
+		process_stage_t stage{};
+
+		std_hashtable_t std_hashtable;
+	};
+
+	ctx_t ctx{1 << 17, 1 << 5, 24};
+
+	std::vector<int> dts;
+	for (int i = 0; i < 20; i++) {
+		dts.push_back(ctx.master());
+	}
+	for (auto& dt : dts) {
+		std::cout << dt << " ";
+	}
+	std::cout << "\n";
+}
+
+
+
 int main() {
 	//test_octotree_stuff();
 	//test_sparse_grid_hash();
 	//test_sparse_grid();
-
-	engine_t engine;
-	engine.execute();
+	//test_thread_pool1();
+	//test_thread_pool2();
+	test_lofi_hashtable();
+	//test_callback();
+	//engine_t engine;
+	//engine.execute();
 	return 0;
 }
