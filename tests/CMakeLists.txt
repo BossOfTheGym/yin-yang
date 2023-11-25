@@ -1,0 +1,1 @@
+add_executable(component_storage component_storage.cpp)

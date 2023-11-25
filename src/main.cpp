@@ -605,7 +605,7 @@ namespace {
 			<< " block_index: " << props.block_index
 			<< " type: " << uniform_type_to_str(props.type)
 			<< " name_length: " << props.name_length
-			<< " location: " << props.location << std::endl;
+			<< " location: " << props.location << "\n";
 		return os;
 	}
 
@@ -837,11 +837,10 @@ out vec3 world_pos;
 flat out int object_id;
 
 void main() {
-	u_v;
 	vec4 pos = m[gl_InstanceID] * vec4(attr_pos, 1.0);
 	world_pos = pos.xyz;
 	object_id = gl_InstanceID;
-	gl_Position = u_p * pos;
+	gl_Position = u_p * u_v * pos;
 }
 )";
 
@@ -923,13 +922,16 @@ void main() {
 
 	// very simple write-only buffer that is mapped by default
 	struct gpu_buffer_t {
-		gpu_buffer_t(std::uint64_t _size) {
-			size = (_size + 63) & ~(std::uint64_t)63;
-			size *= 2;
-
+		gpu_buffer_t(std::uint64_t _size, bool hardcore = true)
+			: size{_size}
+			, im_insane{hardcore} {
 			glCreateBuffers(1, &buffer_id);
-			glNamedBufferStorage(buffer_id, size, nullptr, GL_MAP_PERSISTENT_BIT | GL_MAP_WRITE_BIT /*| GL_MAP_COHERENT_BIT*/);
-			mapped_pointer = glMapNamedBufferRange(buffer_id, 0, size, GL_MAP_PERSISTENT_BIT | GL_MAP_WRITE_BIT /*| GL_MAP_COHERENT_BIT*/);
+
+			GLbitfield buffer_flags = GL_MAP_PERSISTENT_BIT | GL_MAP_WRITE_BIT;
+			glNamedBufferStorage(buffer_id, size, nullptr, buffer_flags);
+			
+			GLbitfield mapping_flags = GL_MAP_PERSISTENT_BIT | GL_MAP_WRITE_BIT | (hardcore ? GL_MAP_FLUSH_EXPLICIT_BIT : 0);
+			mapped_pointer = glMapNamedBufferRange(buffer_id, 0, size, mapping_flags);
 		}
 
 		~gpu_buffer_t() {
@@ -937,16 +939,15 @@ void main() {
 			glDeleteBuffers(1, &buffer_id);
 		}
 
-		void* get_front() const {
-			return mapped_pointer;
-		}
-
-		void* get_back() const {
-			return (char*)mapped_pointer + size / 2;
+		void flush(std::uint64_t offset, std::uint64_t size) {
+			if (im_insane) {
+				glFlushMappedNamedBufferRange(buffer_id, offset, size);
+			}
 		}
 
 		GLuint buffer_id{};
 		std::uint64_t size{};
+		bool im_insane{};
 		void* mapped_pointer{};
 	};
 
@@ -1497,7 +1498,7 @@ void main() {
 
 		[[nodiscard]] handle_t incref(handle_t handle) {
 			if (!is_alive(handle)) {
-				std::cerr << "trying to incref invalid handle " << handle << std::endl;
+				std::cerr << "trying to incref invalid handle " << handle << "\n";
 				return null_handle;
 			}
 			refcount[handle]++;
@@ -1506,7 +1507,7 @@ void main() {
 
 		[[nodiscard]] handle_t incweakref(handle_t handle) {
 			if (!is_alive_weak(handle)) {
-				std::cerr << "trying to weakincref invalid handle " << handle << std::endl;
+				std::cerr << "trying to weakincref invalid handle " << handle << "\n";
 				return null_handle;
 			}
 			weakrefcount[handle]++;
@@ -1515,7 +1516,7 @@ void main() {
 
 		void release(handle_t handle) {
 			if (!is_alive(handle)) {
-				std::cerr << "trying to release invalid handle " << handle << std::endl;
+				std::cerr << "trying to release invalid handle " << handle << "\n";
 				return;
 			}
 			refcount[handle]--;
@@ -1531,7 +1532,7 @@ void main() {
 
 		void release_weak(handle_t handle) {
 			if (!is_alive_weak(handle)) {
-				std::cerr << "trying to release invalid handle " << handle << std::endl;
+				std::cerr << "trying to release invalid handle " << handle << "\n";
 				return;
 			}
 			// TODO : we should not decrement if there are any strong refs
@@ -1544,7 +1545,7 @@ void main() {
 		template<class component_t, class ... args_t>
 		component_t* add_component(handle_t handle, args_t&& ... args) {
 			if (!is_alive(handle)) {
-				std::cerr << "trying to add component to invalid handle " << handle << std::endl;
+				std::cerr << "trying to add component to invalid handle " << handle << "\n";
 				return nullptr;
 			}
 			return component_registry.emplace<component_t>(handle, std::forward<args_t>(args)...);
@@ -1553,7 +1554,7 @@ void main() {
 		template<class component_t>
 		component_t* add_component(handle_t handle, const component_t& component) {
 			if (!is_alive(handle)) {
-				std::cerr << "trying to add component to invalid handle " << handle << std::endl;
+				std::cerr << "trying to add component to invalid handle " << handle << "\n";
 				return nullptr;
 			}
 			return component_registry.add<component_t>(handle, component);
@@ -1562,7 +1563,7 @@ void main() {
 		template<class component_t>
 		component_t* add_component(handle_t handle, component_t&& component) {
 			if (!is_alive(handle)) {
-				std::cerr << "trying to add component to invalid handle " << handle << std::endl;
+				std::cerr << "trying to add component to invalid handle " << handle << "\n";
 				return nullptr;
 			}
 			return component_registry.add<component_t>(handle, std::move(component));
@@ -1571,7 +1572,7 @@ void main() {
 		template<class component_t>
 		void remove_component(handle_t handle) {
 			if (!is_alive(handle)) {
-				std::cerr << "trying to remove component using invalid handle " << handle << std::endl;
+				std::cerr << "trying to remove component using invalid handle " << handle << "\n";
 				return;
 			}
 			component_registry.remove<component_t>(handle);
@@ -1580,7 +1581,7 @@ void main() {
 		template<class component_t>
 		component_t* get_component(handle_t handle) {
 			if (!is_alive(handle)) {
-				std::cerr << "trying to get component using invalid handle " << handle << std::endl;
+				std::cerr << "trying to get component using invalid handle " << handle << "\n";
 				return nullptr;
 			}
 			return component_registry.get<component_t>(handle);
@@ -1605,7 +1606,7 @@ void main() {
 		// it is dafe to erase component while iterating
 		template<class component_t, class func_t>
 		void for_each_component(func_t&& func) {
-			component_registry.for_each<component_t>(std::forward<func_t>(func));
+			component_registry.for_each<component_t>(func);
 		}
 
 		template<class component_t>
@@ -1621,7 +1622,7 @@ void main() {
 		template<class system_t>
 		bool add_system(const std::string& name, std::shared_ptr<system_t> sys) {
 			if (!system_registry.add(name, std::move(sys))) {
-				std::cerr << "failed to add system " << std::quoted(name) << std::endl;
+				std::cerr << "failed to add system " << std::quoted(name) << "\n";
 				return false;
 			}
 			return true;
@@ -1629,7 +1630,7 @@ void main() {
 
 		bool remove_system(const std::string& name) {
 			if (!system_registry.remove(name)) {
-				std::cerr << "failed to remove system " << std::quoted(name) << std::endl;
+				std::cerr << "failed to remove system " << std::quoted(name) << "\n";
 				return false;
 			}
 			return true;
@@ -1640,7 +1641,7 @@ void main() {
 			if (system_t* sys = system_registry.get<system_t>(name)) {
 				return sys;
 			}
-			std::cerr << "failed to get system " << std::quoted(name) << std::endl;
+			std::cerr << "failed to get system " << std::quoted(name) << "\n";
 			return nullptr;
 		}
 
@@ -2001,6 +2002,13 @@ void main() {
 	};
 
 
+	class thread_pool_system_t : public system_if_t, public thread_pool_t {
+	public:
+		thread_pool_system_t(engine_ctx_t* ctx, int thread_count)
+			: system_if_t(ctx), thread_pool_t{thread_count} {}
+	};
+
+
 	using tick_t = float;
 	using timer_component_t = dt_timer_t<tick_t>;
 
@@ -2195,7 +2203,7 @@ void main() {
 				if (auto framebuffer = pass.framebuffer.lock()) {
 					framebuffer->bind();
 				} else {
-					std::cerr << "framebuffer expired" << std::endl;
+					std::cerr << "framebuffer expired" << "\n";
 					continue;
 				}
 
@@ -2225,7 +2233,7 @@ void main() {
 			auto basic_program_ptr = ([&] () {
 				auto [program, info_log] = gen_basic_shader_program();
 				if (!program.valid()) {
-					std::cerr << info_log << std::endl;
+					std::cerr << info_log << "\n";
 					return std::make_shared<shader_program_t>();
 				}
 				return std::make_shared<shader_program_t>(std::move(program));
@@ -2234,13 +2242,13 @@ void main() {
 			auto basic_instanced_program_ptr = ([&] () {
 				auto [program, info_log] = gen_basic_instanced_shader_program();
 				if (!program.valid()) {
-					std::cerr << info_log << std::endl;
+					std::cerr << info_log << "\n";
 					return std::make_shared<shader_program_t>();
 				}
 				return std::make_shared<shader_program_t>(std::move(program));
 			})();
 
-			auto sphere_mesh_ptr = std::make_shared<mesh_t>(gen_sphere_mesh(3));
+			auto sphere_mesh_ptr = std::make_shared<mesh_t>(gen_sphere_mesh(2));
 			auto sphere_vao_ptr = std::make_shared<vertex_array_t>(gen_vertex_array_from_mesh(*sphere_mesh_ptr));
 			auto pyramid_mesh_ptr = std::make_shared<mesh_t>(gen_pyramid_mesh());
 			auto pyramid_vao_ptr = std::make_shared<vertex_array_t>(gen_vertex_array_from_mesh(*pyramid_mesh_ptr));
@@ -2290,6 +2298,30 @@ void main() {
 	#define std430_vec4 alignas(sizeof(glm::vec4)) glm::vec4
 	#define std430_float alignas(sizeof(float)) float
 
+	struct offset_utility_t {
+		offset_utility_t(std::uint64_t _offset, std::uint64_t _alignment)
+			: offset{_offset}
+			, alignment{_alignment}
+		{
+			assert(std::has_single_bit(alignment));
+			offset = (offset + alignment - 1) & ~(alignment - 1);
+		}
+
+		std::uint64_t push(std::uint64_t amount) {
+			std::uint64_t old_offset = offset;
+			offset = (offset + amount + alignment - 1) & ~(alignment - 1);
+			return old_offset;
+		}
+
+		std::uint64_t offset{};
+		std::uint64_t alignment{};
+	};
+
+
+	void* advance_ptr(void* ptr, std::ptrdiff_t amount) {
+		return (char*)ptr + amount;
+	}
+
 	class basic_renderer_system_t : public system_if_t {
 	public:
 		struct std430_basic_material_t {
@@ -2301,27 +2333,26 @@ void main() {
 		static constexpr int max_instances = 100000;
 
 		basic_renderer_system_t(engine_ctx_t* ctx) : system_if_t(ctx) {
-			program = get_ctx()->get_resource<shader_program_t>("basic_program");
 			instanced_program = get_ctx()->get_resource<shader_program_t>("basic_instanced_program");
-
 			sphere = get_ctx()->get_resource<vertex_array_t>("sphere");
 
-			m_size = max_instances * sizeof(glm::mat4);
-			object_mtl_size = max_instances * sizeof(std430_basic_material_t);
+			offset_utility_t offset_utility{0, 4096}; // just in case
 
-			instance_buffer = std::make_unique<gpu_buffer_t>(m_size + object_mtl_size + 2 * 256);
+			mats_size = max_instances * sizeof(glm::mat4);
+			mats_offset_prev = offset_utility.push(mats_size);
+			mats_offset_next = offset_utility.push(mats_size);
 
-			m_offset = (((std::uintptr_t)instance_buffer->mapped_pointer + 255ull) & ~255ull) - (std::uintptr_t)instance_buffer->mapped_pointer;
-			object_mtl_offset = (m_offset + m_size + 255ull) & ~255ull;
+			mtls_size = max_instances * sizeof(std430_basic_material_t);
+			mtls_offset_prev = offset_utility.push(mtls_size);
+			mtls_offset_next = offset_utility.push(mtls_size);
 
-			m = (glm::mat4*)((char*)instance_buffer->mapped_pointer + m_offset);
-			object_mtl = (std430_basic_material_t*)((char*)instance_buffer->mapped_pointer + object_mtl_offset);
+			instance_buffer = std::make_unique<gpu_buffer_t>(offset_utility.offset);
 
 			auto* imgui = get_ctx()->get_system<imgui_system_t>("imgui");
 			imgui->register_callback([&] () {
 				ImGui::SetNextWindowSize(ImVec2{256, 256}, ImGuiCond_Once);
 				if (ImGui::Begin("basic renderer")) {
-					ImGui::Checkbox("submit data", &submit_data);
+					ImGui::Text("Hello");
 				}
 				ImGui::End();
 				return true;
@@ -2330,6 +2361,10 @@ void main() {
 
 	private:
 		void render_pass_instanced(basic_pass_t* pass, camera_t* camera, omnidir_light_t* light) {
+			if (prev_frame_submitted <= 0) {
+				return;
+			}
+
 			// TODO : create utility to save/restore context
 			struct save_restore_render_state_t {
 				save_restore_render_state_t() {
@@ -2368,33 +2403,8 @@ void main() {
 			if (auto framebuffer = pass->framebuffer.lock()) {
 				framebuffer->bind();
 			} else {
-				std::cerr << "framebuffer expired" << std::endl;
+				std::cerr << "framebuffer expired" << "\n";
 				return;
-			}
-
-			auto* ctx = get_ctx();
-
-			int object_count = 0;
-			if (submit_data) {
-				for (auto& [handle, material] : ctx->iterate_components<basic_material_t>()) {
-					auto* transform = ctx->get_component<transform_t>(handle);
-					if (!transform) {
-						std::cerr << "missing transform component. handle: " << handle << std::endl;
-						continue;
-					}
-
-					m[object_count] = transform->to_mat4();
-
-					auto& mtl = object_mtl[object_count];
-					mtl.color = material.color;
-					mtl.shininess = material.shininess;
-					mtl.specular_strength = material.specular_strength;
-
-					object_count++;
-				}
-				last_submitted = object_count;
-			} else {
-				object_count = last_submitted;
 			}
 
 			auto& viewport = pass->viewport;
@@ -2407,41 +2417,69 @@ void main() {
 			glEnable(GL_CULL_FACE);
 
 			instanced_program->use();
-			//instanced_program->set_mat4("u_v", camera->get_view());
-			instanced_program->set_mat4("u_p", camera->get_proj(viewport.get_aspect_ratio()) * camera->get_view());
+			instanced_program->set_mat4("u_v", camera->get_view());
+			instanced_program->set_mat4("u_p", camera->get_proj(viewport.get_aspect_ratio()));
 			instanced_program->set_vec3("u_eye_pos", camera->eye);
 			instanced_program->set_vec3("u_ambient_color", light->ambient);
 			instanced_program->set_vec3("u_light_color", light->color);
 			instanced_program->set_vec3("u_light_pos", light->pos);
 
+			// TODO : offsets considering back/front buffers
 			sphere->bind();
-			/*glBindBufferRange(GL_SHADER_STORAGE_BUFFER, 0, instance_buffer->buffer_id, m_offset, m_size);
-			glBindBufferRange(GL_SHADER_STORAGE_BUFFER, 1, instance_buffer->buffer_id, object_mtl_offset, object_mtl_size);
-			glDrawArraysInstanced(sphere->mode, 0, sphere->count, object_count);*/
-
-			int split = 8;
-			int part = object_count / split;
-			for (int start = 0; start < object_count; start += part) {
-				int inst_count = std::min(start + part, object_count) - start;
-
-				glBindBufferRange(GL_SHADER_STORAGE_BUFFER, 0, instance_buffer->buffer_id, m_offset + sizeof(glm::mat4) * start, sizeof(glm::mat4) * inst_count);
-				glBindBufferRange(GL_SHADER_STORAGE_BUFFER, 1, instance_buffer->buffer_id, object_mtl_offset + sizeof(std430_basic_material_t) * start, sizeof(std430_basic_material_t) * inst_count);
-				glDrawArraysInstanced(sphere->mode, 0, sphere->count, inst_count);
-			}
+			glBindBufferRange(GL_SHADER_STORAGE_BUFFER, 0, instance_buffer->buffer_id, render_prev_buffer ? mats_offset_prev : mats_offset_next, prev_frame_submitted * sizeof(glm::mat4));
+			glBindBufferRange(GL_SHADER_STORAGE_BUFFER, 1, instance_buffer->buffer_id, render_prev_buffer ? mtls_offset_prev : mtls_offset_next, prev_frame_submitted * sizeof(std430_basic_material_t));
+			glDrawArraysInstanced(sphere->mode, 0, sphere->count, prev_frame_submitted);
 		}
 
-	public:
-		void update() {
+		void swap_buffers() {
+			render_prev_buffer ^= 1;
+			prev_frame_submitted = next_frame_submitted;
+		}
+
+		void submit_next_frame() {
+			auto* ctx = get_ctx();
+
+			auto* mats = (glm::mat4*)advance_ptr(instance_buffer->mapped_pointer, render_prev_buffer ? mats_offset_next : mats_offset_prev);
+			auto* mtls = (std430_basic_material_t*)advance_ptr(instance_buffer->mapped_pointer, render_prev_buffer ? mtls_offset_next : mtls_offset_prev);
+
+			int object_count = 0;
+			for (auto& [handle, material] : ctx->iterate_components<basic_material_t>()) {
+				auto* transform = ctx->get_component<transform_t>(handle);
+				if (!transform) {
+					std::cerr << "missing transform component. handle: " << handle << "\n";
+					continue;
+				}
+
+				mats[object_count] = transform->to_mat4();
+
+				auto& mtl = mtls[object_count];
+				mtl.color = material.color;
+				mtl.shininess = material.shininess;
+				mtl.specular_strength = material.specular_strength;
+
+				object_count++;
+				if (object_count >= max_instances) {
+					break;
+				}
+			}
+
+			next_frame_submitted = object_count;
+
+			instance_buffer->flush(render_prev_buffer ? mats_offset_next : mats_offset_prev, next_frame_submitted * sizeof(glm::mat4));
+			instance_buffer->flush(render_prev_buffer ? mtls_offset_next : mtls_offset_prev, next_frame_submitted * sizeof(std430_basic_material_t));
+		}
+
+		void render_prev_frame() {
 			for (auto& [handle, pass] : get_ctx()->iterate_components<basic_pass_t>()) {
 				auto* camera = pass.camera.get().get_component<camera_t>();
 				if (!camera) {
-					std::cerr << "missing camera component. handle: " << handle << " camera: " << pass.camera.get().get_handle() << std::endl;
+					std::cerr << "missing camera component. handle: " << handle << " camera: " << pass.camera.get().get_handle() << "\n";
 					continue;
 				}
 
 				auto* light = pass.light.get().get_component<omnidir_light_t>();
 				if (!light) {
-					std::cerr << "missing light component. handle: " << handle << " light: " << pass.light.get().get_handle() << std::endl;
+					std::cerr << "missing light component. handle: " << handle << " light: " << pass.light.get().get_handle() << "\n";
 					continue;
 				}
 
@@ -2449,26 +2487,48 @@ void main() {
 			}
 		}
 
+	public:
+		void update() {
+			swap_buffers();
+			render_prev_frame();
+			submit_next_frame();
+		}
+
 	private:
-		resource_ptr_t<shader_program_t> program;
 		resource_ptr_t<shader_program_t> instanced_program;
 		resource_ptr_t<vertex_array_t> sphere;
 
 		std::unique_ptr<gpu_buffer_t> instance_buffer;
-		std::uint64_t m_offset{};
-		std::uint64_t m_size{};
-		glm::mat4* m{};
-		std::uint64_t object_mtl_offset{};
-		std::uint64_t object_mtl_size{};
-		std430_basic_material_t* object_mtl{};
 
-		bool submit_data = true;
-		int last_submitted{};
+		std::uint64_t mats_offset_prev{};
+		std::uint64_t mats_offset_next{};
+		std::uint64_t mats_size{};
+
+		std::uint64_t mtls_offset_prev{};
+		std::uint64_t mtls_offset_next{};
+		std::uint64_t mtls_size{};
+
+		int prev_frame_submitted{};
+		int next_frame_submitted{};
+		int render_prev_buffer{};
 	};
 
 
 	class window_system_t : public system_if_t {
 	public:
+		static void gl_debug_callback(
+			GLenum source,
+			GLenum type,
+			GLuint id,
+			GLenum severity,
+			GLsizei length,
+			const GLchar* message,
+			const void* userParam) {
+			if (type == GL_DEBUG_TYPE_ERROR) {
+				std::cerr << "gl err: " << message << "\n";
+			}
+		}
+
 		window_system_t(engine_ctx_t* ctx, int window_width, int window_height) : system_if_t(ctx) {
 			glfw_guard = std::make_unique<glfw::guard_t>();
 			window = std::make_unique<glfw::window_t>(
@@ -2476,6 +2536,9 @@ void main() {
 			);
 			window->make_ctx_current();
 			glew_guard = std::make_unique<glew_guard_t>();
+
+			glEnable(GL_DEBUG_OUTPUT);
+			glDebugMessageCallback(gl_debug_callback, nullptr);
 
 			/*if (GLEW_ARB_gpu_shader_int64) {
 				if (glewGetExtension("GL_ARB_gpu_shader_int64")) {
@@ -2873,6 +2936,7 @@ void main() {
 		int object_count{};
 	};
 
+	// TODO : does not work, apply force-insert idea to the first hashtable
 	struct lofi_hashtable1_t {
 		static constexpr int scans_force_insert = 32;
 		static constexpr int scans_force_insert_m1 = scans_force_insert - 1;
@@ -3250,10 +3314,6 @@ void main() {
 		}
 
 		void update_physics() {
-			if (!enabled) {
-				return;
-			}
-
 			for (int i = 0; i < total_objects; i++) {
 				auto& physics = *cached_components[i];
 				auto& updated = integrator_updates[i];
@@ -3277,6 +3337,9 @@ void main() {
 
 	public:
 		void update(float dt) {
+			if (!enabled) {
+				return;
+			}
 			cache_components();
 			initialize_grid();
 			for (int i = 0; i < dt_split; i++) {
@@ -3305,7 +3368,7 @@ void main() {
 		float o2o{};
 		int dt_split{};
 
-		bool enabled{true};
+		bool enabled{false};
 
 		int frame{};
 		std::size_t total_objects{};
@@ -3320,7 +3383,7 @@ void main() {
 	using seed_t = std::uint64_t;
 
 	seed_t shuffle(seed_t value) {
-		return std::rotl(value, 17) * 0x123456789ABCDEF0 + std::rotr(value, 17);
+		return std::rotl(value, 17) * 0x123456789ABCDEF1 + std::rotr(value, 17);
 	}
 
 	class basic_int_gen_t {
@@ -3464,13 +3527,13 @@ void main() {
 	void sync_attractor_components(entity_t entity) {
 		auto* attractor = entity.get_component<attractor_t>();
 		if (!attractor) {
-			std::cerr << "missing attractor component. handle " << entity.get_handle() << std::endl;
+			std::cerr << "missing attractor component. handle " << entity.get_handle() << "\n";
 			return;
 		}
 
 		auto* transform = entity.get_component<transform_t>();
 		if (!transform) {
-			std::cerr << "missing transform component. handle " << entity.get_handle() << std::endl;
+			std::cerr << "missing transform component. handle " << entity.get_handle() << "\n";
 			return;
 		}
 
@@ -3486,13 +3549,13 @@ void main() {
 	void sync_transform_physics(entity_t entity) {
 		auto* transform = entity.get_component<transform_t>();
 		if (!transform) {
-			std::cerr << "missing transform component. handle " << entity.get_handle() << std::endl;
+			std::cerr << "missing transform component. handle " << entity.get_handle() << "\n";
 			return;
 		}
 
 		auto* physics = entity.get_component<physics_t>();
 		if (!physics) {
-			std::cerr << "missing physics component. handle " << entity.get_handle() << std::endl;
+			std::cerr << "missing physics component. handle " << entity.get_handle() << "\n";
 			return;
 		}
 
@@ -3617,7 +3680,7 @@ void main() {
 			omnidir_light_t light = {
 				.ambient = glm::vec3(0.2f),
 				.color = glm::vec3(10.0f),
-				.pos = glm::vec3(10.0f),
+				.pos = glm::vec3(0.0f),
 			};
 
 			entity_t object(get_ctx());
@@ -3806,8 +3869,11 @@ void main() {
 			};
 
 			level_system_info_t level_info{
-				.balls_count = 10000,
+				.balls_count = 1000,
 			};
+
+			thread_pool = std::make_shared<thread_pool_system_t>(ctx, 24);
+			ctx->add_system("thread_pool", thread_pool);
 
 			window_system = std::make_shared<window_system_t>(ctx, window_width, window_height);
 			ctx->add_system("window", window_system);
@@ -3863,6 +3929,9 @@ void main() {
 
 			ctx->remove_system("window");
 			window_system.reset();
+
+			ctx->remove_system("thread_pool");
+			thread_pool.reset();
 		}
 
 		virtual void execute() override {
@@ -3893,6 +3962,7 @@ void main() {
 
 	private:
 		engine_ctx_t* ctx{};
+		std::shared_ptr<thread_pool_system_t> thread_pool;
 		std::shared_ptr<window_system_t> window_system;
 		std::shared_ptr<basic_resources_system_t> basic_resources_system;
 		std::shared_ptr<basic_renderer_system_t> basic_renderer_system;
@@ -3920,14 +3990,16 @@ void main() {
 		std::unique_ptr<mainloop_if_t> mainloop;
 	};
 
-	// TODO : component iterate method
-	// TODO : replace hashtable with vector like in entt
-	// TODO : simplify hash function
-	// TODO : test lofi_hashtable
-	// TODO : thread pool
-	// TODO : job
-	// TODO : mutltithreaded physics update
+	// TODO : add thread pool system
+	// TODO : rework & enhance little bit the component storage
 	// TODO : multithreaded render data submission
+	// TODO : accelerate updates
+	// TODO : optimize sphere mesh
+	// TODO : mutltithreaded physics update
+	// TODO : replace hashtable with vector like in entt
+	// 
+	// TODO : simplify hash function, maybe use simd there
+	// 
 	// TODO : script_system
 	// TODO : simple timer system
 	// TODO : ball_spawner_system_t
@@ -4511,9 +4583,9 @@ int main() {
 	//test_sparse_grid();
 	//test_thread_pool1();
 	//test_thread_pool2();
-	test_lofi_hashtable();
+	//test_lofi_hashtable();
 	//test_callback();
-	//engine_t engine;
-	//engine.execute();
+	engine_t engine;
+	engine.execute();
 	return 0;
 }
