@@ -45,9 +45,11 @@ find_package(glew CONFIG REQUIRED)
 find_package(EnTT CONFIG REQUIRED)
 find_package(glm CONFIG REQUIRED)
 find_package(OpenAL CONFIG REQUIRED) # yeah, installed by vcpkg or whatever package manager you use
+find_package(nlohmann_json CONFIG REQUIRED)
 
-set(ALL_DEPS "${OPENGL_LIBS};glfw;GLEW::GLEW;EnTT::EnTT;glm::glm;OpenAL::OpenAL")
-
+#set(ALL_DEPS "${OPENGL_LIBS};glfw;GLEW::GLEW;EnTT::EnTT;glm::glm;OpenAL::OpenAL;nlohmann_json::nlohmann_json")
+set(ALL_DEPS ${OPENGL_LIBS} glfw GLEW::GLEW EnTT::EnTT glm::glm OpenAL::OpenAL nlohmann_json::nlohmann_json)
+set(JSON_LIB nlohmann_json::nlohmann_json)
 
 # utility to create neat project filters
 # takes one optional parameter - source directory that is current directory (.) by default
@@ -84,6 +86,8 @@ endif()
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# whatever
+# very first include
 add_subdirectory(src)
+
+# can you yin_yang
 add_subdirectory(tests)
