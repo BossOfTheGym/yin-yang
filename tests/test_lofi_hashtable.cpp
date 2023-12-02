@@ -1,4 +1,6 @@
 #include <chrono>
+#include <string>
+#include <fstream>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -7,7 +9,36 @@
 #include <sparse_cell.hpp>
 #include <thread_pool.hpp>
 
+#include <nlohmann/json.hpp>
 
+namespace nlj = nlohmann;
+
+using json = nlj::ordered_json;
+
+struct lofi_test_settings_t {
+	int cell_count{};
+	int repeat{};
+	int job_count{};
+
+	int x_seed{};
+	int x_min{};
+	int x_max{};
+
+	int y_seed{};
+	int y_min{};
+	int y_max{};
+
+	int z_seed{};
+	int z_min{};
+	int z_max{};
+
+	int shuffle_seed{};
+	bool should_shuffle{};
+
+	bool should_test_std{};
+ };
+
+template<class hashtable_t>
 struct lofi_test_ctx_t {
 	using std_hashtable_t = std::unordered_multiset<sparse_cell_t, sparse_cell_hasher_t, sparse_cell_equals_t>;
 
@@ -42,18 +73,19 @@ struct lofi_test_ctx_t {
 		return ctx->cells[cell1] == ctx->cells[cell2];
 	}
 
-	lofi_test_ctx_t(int _cell_count, int _repeat, int _job_count, bool should_shuffle = false)
-		: cell_count{_cell_count}
-		, repeat{_repeat}
-		, job_count{_job_count}
+	lofi_test_ctx_t(const lofi_test_settings_t& settings)
+		: cell_count{settings.cell_count}
+		, repeat{settings.repeat}
+		, job_count{settings.job_count}
 		, total_cell_count{cell_count * repeat}
 		, hashtable{total_cell_count, lofi_hasher_t{this, hash}, lofi_equals_t{this, equals}}
 		, used_buckets{total_cell_count}
-		, thread_pool{job_count} {
+		, thread_pool{job_count}
+		, should_test_std{settings.should_test_std} {
 
-		int_gen_t x_gen(561, -40000, 50000);
-		int_gen_t y_gen(1442, -40000, 50000);
-		int_gen_t z_gen(105001, -40000, 50000);
+		int_gen_t x_gen(settings.x_seed, settings.x_min, settings.x_max);
+		int_gen_t y_gen(settings.y_seed, settings.y_min, settings.y_max);
+		int_gen_t z_gen(settings.z_seed, settings.z_min, settings.z_max);
 
 		cells.reserve(total_cell_count);
 		for (int i = 0; i < cell_count; i++) {
@@ -65,8 +97,8 @@ struct lofi_test_ctx_t {
 			}
 		}
 
-		if (should_shuffle) {
-			shuffle_vec(cells, 666);
+		if (settings.should_shuffle) {
+			shuffle_vec(cells, settings.shuffle_seed);
 		}
 
 		jobs.reserve(job_count);
@@ -74,10 +106,16 @@ struct lofi_test_ctx_t {
 			jobs.push_back(std::make_unique<job_t>(this, i));
 		}
 
-		std_hashtable.reserve(total_cell_count);
+		if (should_test_std) {
+			std_hashtable.reserve(total_cell_count);
+		}
 	}
 
-	int master() {
+	json master() {
+		if (should_test_std) {
+			std_hashtable.clear();
+		}
+
 		auto t1 = std::chrono::high_resolution_clock::now();
 
 		hashtable.reset_size(total_cell_count);
@@ -105,10 +143,6 @@ struct lofi_test_ctx_t {
 		auto dt32 = std::chrono::duration_cast<microseconds_t>(t3 - t2).count();
 		auto dt43 = std::chrono::duration_cast<microseconds_t>(t4 - t3).count();
 
-		std::cout << " ---=== in microseconds ===---" << "\n";
-		std::cout << "lofi: " << dt32 + dt21 << " = " << dt32 << " + " << dt21 << "\n";
-		std::cout << "std: " << dt43 << "\n";
-
 		int max_count = 0;
 		int inserted = 0;
 		for (int i = 0; i < hashtable.get_buckets_count(); i++) {
@@ -124,21 +158,29 @@ struct lofi_test_ctx_t {
 			total_scans += job->total_scans;
 		}
 
-		std::cout << "max count: " << max_count << "\n";
-		std::cout << "max scans: " << max_scans << "\n";
-		std::cout << "total scans: " << total_scans << "\n";
-		std::cout << "avg scans: " << (double)total_scans / total_cell_count << "\n";
-		std::cout << "inserted: " << inserted << "\n";
-		std::cout << "used buckets: " << used_buckets.get_size() << "\n";
-		std::cout << "hashtable valid: " << check_lofi_hashtable() << "\n";
+		double avg_scans = (double)total_scans / total_cell_count;
+		bool hashtable_valid = check_lofi_hashtable();
 
-		return dt32 + dt21;
+		json stats = json::object({
+			{"std_build", dt43},
+			{"lofi_prepare", dt21},
+			{"lofi_build", dt32},
+			{"lofi_total", dt21 + dt32}, // unnecessary but human readable
+			{"max_count_in_bucket", max_count},
+			{"max_insertion_scans", max_scans},
+			{"total_scans", total_scans},
+			{"avg_scans", avg_scans},
+			{"total_inserted", inserted},
+			{"used_buckets", used_buckets.get_size()},
+			{"hashtable_valid", hashtable_valid},
+		});
+
+		return stats;
 	}
 
 	bool check_lofi_hashtable() {
 		int added_count = 0;
 		std::vector<bool> cell_added(total_cell_count);
-
 		for (int i = 0, count = used_buckets.get_size(); i < count; i++) {
 			auto& bucket = hashtable.get_bucket(used_buckets.data[i]);
 
@@ -162,7 +204,20 @@ struct lofi_test_ctx_t {
 			}
 		}
 
-		return added_count == total_cell_count;
+		if (added_count != total_cell_count) {
+			return false;
+		}
+
+		std::unordered_set<int> buckets;
+		int used_buckets_count = used_buckets.size.load(std::memory_order_relaxed);
+		for (int i = 0; i < used_buckets_count; i++) {
+			auto [it, inserted] = buckets.insert(used_buckets.data[i]);
+			if (!inserted) {
+				return false;
+			}
+		}
+
+		return true;
 	}
 
 	void worker(job_t* job) {
@@ -177,7 +232,7 @@ struct lofi_test_ctx_t {
 				break;
 			}
 
-								 // put
+			// put
 			case BuildHashtable: {
 				constexpr int batch_size = 128;
 
@@ -213,9 +268,9 @@ struct lofi_test_ctx_t {
 				break;
 			}
 
-							   // std
+			// std
 			case BuildStdHashtable: {
-				if (job->job_id == -1) {
+				if (should_test_std && job->job_id == 0) {
 					auto [start, stop] = compute_job_range(hashtable.get_object_count(), 1, 0);
 					while (start != stop) {
 						std_hashtable.insert(cells[start++]);
@@ -240,9 +295,11 @@ struct lofi_test_ctx_t {
 	int job_count{};
 	int total_cell_count{};
 
+	bool should_test_std{};
+
 	std::vector<sparse_cell_t> cells{};
 
-	lofi_hashtable2_t hashtable;
+	hashtable_t hashtable;
 	lofi_stack_t<int> used_buckets;
 
 	thread_pool_t thread_pool;
@@ -252,19 +309,70 @@ struct lofi_test_ctx_t {
 	std_hashtable_t std_hashtable;
 };
 
-void test_lofi_hashtable() {
-	lofi_test_ctx_t ctx{1 << 17, 1 << 4, 24};
+inline constexpr const int test_invocations = 32;
 
-	std::vector<int> dts;
-	for (int i = 0; i < 100; i++) {
-		dts.push_back(ctx.master());
+void test_lofi_hashtable() {
+	const std::string basic_test_name = "some_basic_case";
+
+	lofi_test_settings_t settings{
+		.cell_count = 1 << 16,
+		.repeat = 1 << 4,
+		.job_count = 24,
+
+		.x_seed = 41,
+		.x_min = -10000,
+		.x_max = +10000,
+
+		.y_seed = 42,
+		.y_min = -10000,
+		.y_max = +10000,
+
+		.z_seed = 43,
+		.z_min = -10000,
+		.z_max = +10000,
+
+		.shuffle_seed = 123,
+		.should_shuffle = true,
+
+		.should_test_std = false,
+	};
+
+	json basic_stats = json::object({
+		{"cell_count", settings.cell_count},
+		{"repeat", settings.repeat},
+		{"total_cells", settings.cell_count * settings.repeat}, // not neccessary but human readable
+		{"job_count", settings.job_count},
+		{"x_seed_min_max", {settings.x_seed, settings.x_min, settings.x_max}},
+		{"y_seed_min_max", {settings.y_seed, settings.y_min, settings.y_max}},
+		{"z_seed_min_max", {settings.z_seed, settings.z_min, settings.z_max}},
+		{"shuffle_seed", settings.shuffle_seed},
+		{"should_shuffle", settings.should_shuffle},
+		{"should_test_std", settings.should_test_std},
+		{"stats", json::array()},
+	});
+
+	json stats1 = basic_stats;
+	lofi_test_ctx_t<lofi_hashtable1_t> ctx1{settings};
+	for (int i = 0; i < test_invocations; i++) {
+		stats1["stats"].push_back(ctx1.master());
 	}
-	for (auto& dt : dts) {
-		std::cout << dt << " ";
+	{
+		std::ofstream ofs(basic_test_name + "_v1.json");
+		ofs << std::setw(4) << stats1;
 	}
-	std::cout << "\n";
+
+	json stats2 = basic_stats;
+	lofi_test_ctx_t<lofi_hashtable2_t> ctx2{settings};
+	for (int i = 0; i < test_invocations; i++) {
+		stats2["stats"].push_back(ctx2.master());
+	}
+	{
+		std::ofstream ofs(basic_test_name + "_v2.json");
+		ofs << std::setw(4) << stats2 << "\n";
+	}
 }
 
 int main() {
+	test_lofi_hashtable();
 	return 0;
 }

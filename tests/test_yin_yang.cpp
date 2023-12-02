@@ -2724,7 +2724,6 @@ void test_callback() {
 	cb(5);
 }
 
-
 int main() {
 	//test_octotree_stuff();
 	//test_sparse_grid_hash();
@@ -2732,7 +2731,7 @@ int main() {
 	//test_thread_pool1();
 	//test_thread_pool2();
 	//test_callback();
-	
+
 	engine_t engine;
 	engine.execute();
 	return 0;

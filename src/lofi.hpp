@@ -5,8 +5,10 @@
 using lofi_hasher_t = callback_t<std::uint32_t(int)>;
 using lofi_equals_t = callback_t<bool(int, int)>;
 
-struct lofi_hashtable_t {
+struct lofi_hashtable1_t {
 	static constexpr int inflation_coef = 2;
+
+	static_assert(std::has_single_bit<unsigned>(inflation_coef), "must be power of 2");
 
 	struct bucket_t {
 		void reset() {
@@ -22,12 +24,12 @@ struct lofi_hashtable_t {
 		int next{};
 	};
 
-	lofi_hashtable_t(const lofi_hashtable_t&) = delete;
-	lofi_hashtable_t& operator= (const lofi_hashtable_t&) = delete;
-	lofi_hashtable_t(lofi_hashtable_t&&) noexcept = delete;
-	lofi_hashtable_t& operator= (lofi_hashtable_t&&) noexcept = delete;
+	lofi_hashtable1_t(const lofi_hashtable1_t&) = delete;
+	lofi_hashtable1_t& operator= (const lofi_hashtable1_t&) = delete;
+	lofi_hashtable1_t(lofi_hashtable1_t&&) noexcept = delete;
+	lofi_hashtable1_t& operator= (lofi_hashtable1_t&&) noexcept = delete;
 
-	lofi_hashtable_t(int _max_size, lofi_hasher_t _hasher, lofi_equals_t _equals)
+	lofi_hashtable1_t(int _max_size, lofi_hasher_t _hasher, lofi_equals_t _equals)
 		: hasher{_hasher}
 		, equals{_equals}
 		, max_capacity{nextpow2(_max_size) * inflation_coef}
@@ -37,7 +39,7 @@ struct lofi_hashtable_t {
 	}
 
 	// master
-	void reset_size(int new_object_count) {
+	void reset_size(int new_object_count) { // TODO : move out
 		object_count = std::min(max_capacity / inflation_coef, new_object_count);
 		capacity_m1 = std::min(max_capacity, nextpow2(object_count) * inflation_coef) - 1;
 		capacity_log2 = std::countr_zero<unsigned>(capacity_m1 + 1);
@@ -122,7 +124,7 @@ struct lofi_hashtable_t {
 	lofi_equals_t equals;
 
 	std::unique_ptr<bucket_t[]> buckets; // resized to capacity (increased capacity to decrease contention)
-	std::unique_ptr<list_entry_t[]> list_entries; // size = object_count
+	std::unique_ptr<list_entry_t[]> list_entries; // size = object_count // TODO : move out
 
 	const int max_capacity;
 	int object_count{};
@@ -132,7 +134,7 @@ struct lofi_hashtable2_t {
 	static constexpr int inflation_coef = 2; // power of 2
 	static constexpr int capacity_split_coef_log2 = 2;
 	static constexpr int capacity_split_coef = 1 << capacity_split_coef_log2; // power of 2
-	static constexpr int max_scans_per_split = 8;
+	static constexpr int max_scans_per_split = 3;
 
 	static_assert(std::has_single_bit<unsigned>(inflation_coef), "must be power of 2");
 	static_assert(std::has_single_bit<unsigned>(capacity_split_coef), "must be power of 2");
@@ -174,10 +176,10 @@ struct lofi_hashtable2_t {
 	}
 
 	// master
-	void reset_size(int new_object_count) {
+	void reset_size(int new_object_count) { // TODO : rename to bucket_hint
 		object_count = std::min(max_capacity / inflation_coef, new_object_count);
 		// split_capacity_m1 + 1 == 1 << split_capacity_log2
-		split_capacity_m1 = std::min(max_capacity, nextpow2(object_count) * inflation_coef / capacity_split_coef) - 1;
+		split_capacity_m1 = std::min(max_capacity, nextpow2(object_count) * inflation_coef) / capacity_split_coef - 1;
 		split_capacity_log2 = std::countr_zero<unsigned>(split_capacity_m1 + 1);
 	}
 
@@ -228,7 +230,7 @@ struct lofi_hashtable2_t {
 
 			auto [bucket_index, scans] = _put(buckets.get() + offset, split_capacity_m1, base_index, item, max_scans_per_split);
 			if (scans != -1) {
-				return {bucket_index, total_scans + scans};
+				return {bucket_index != -1 ? bucket_index + offset : -1, total_scans + scans};
 			}
 
 			hash = hash_repeat(hash);
@@ -307,7 +309,7 @@ struct lofi_hashtable2_t {
 	lofi_equals_t equals;
 
 	std::unique_ptr<bucket_t[]> buckets; // nextpow2(object_count) * inflation_coef
-	std::unique_ptr<list_entry_t[]> list_entries; // always size = object_count
+	std::unique_ptr<list_entry_t[]> list_entries; // always size = object_count // TODO : move out
 
 	const int max_capacity;
 	int object_count{};

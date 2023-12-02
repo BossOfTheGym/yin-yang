@@ -13,7 +13,10 @@
 #include <glm/glm.hpp>
 #include <glm/mat3x3.hpp>
 #include <glm/common.hpp>
+
 #include <glm/gtc/type_ptr.hpp>
+
+inline int test_var = 666;
 
 template<class ... tag_t>
 struct type_id_t {
@@ -163,7 +166,7 @@ private:
 	float_gen_t h_gen;
 };
 
-glm::vec3 hsl_to_rgb(const glm::vec3& hsl) {
+inline glm::vec3 hsl_to_rgb(const glm::vec3& hsl) {
 	float h = hsl.x, s = hsl.y, l = hsl.z;
 
 	float c = (1.0f - std::abs(2.0f * l - 1.0f)) * s;
@@ -198,7 +201,7 @@ public:
 
 using hsv_color_gen_t = hsl_color_gen_t;
 
-glm::vec3 hsv_to_rgb(const glm::vec3& hsv) {
+inline glm::vec3 hsv_to_rgb(const glm::vec3& hsv) {
 	float h = hsv.x, s = hsv.y, v = hsv.z;
 
 	float c = v * s;
