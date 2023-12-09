@@ -1,6 +1,7 @@
 #pragma once
 
 #include <bit>
+#include <array>
 #include <random>
 #include <cassert>
 #include <cstdint>
@@ -391,3 +392,66 @@ inline void assert_false(bool value, std::string_view error) {
 inline void assert_true(bool value, std::string_view error) {
 	assert_check(value, error);
 }
+
+template<class type_t, int capacity>
+struct static_vector_t {
+	bool can_push() const {
+		return count < capacity;
+	}
+
+	void push_back(type_t value) {
+		assert(can_push());
+		_data[count++] = value;
+	}
+
+	void pop_back() {
+		count--;
+	}
+
+	void reset() {
+		count = 0;
+	}
+
+	type_t& operator[] (int i) {
+		return _data[i];
+	}
+
+	const type_t& operator[] (int i) const {
+		return _data[i];
+	}
+
+	auto begin() {
+		return _data.begin();
+	}
+
+	auto end() {
+		return _data.end();
+	}
+
+	auto begin() const {
+		return _data.begin();
+	}
+
+	auto end() const {
+		return _data.end();
+	}
+
+	int size() const {
+		return count;
+	}
+
+	bool empty() const {
+		return count == 0;
+	}
+
+	type_t* data() {
+		return _data.data();
+	}
+
+	const type_t* data() const {
+		return _data.data();
+	}
+
+	std::array<type_t, capacity> _data;
+	int count{};
+};

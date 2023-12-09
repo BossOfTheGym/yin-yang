@@ -35,6 +35,7 @@
 
 #include <ecs.hpp>
 #include <glfw.hpp>
+#include <lofi.hpp>
 #include <utils.hpp>
 #include <dt_timer.hpp>
 #include <sparse_cell.hpp>
@@ -1351,20 +1352,20 @@ void main() {
 			return component_registry.view(_component_storage_desc_t{});
 		}
 
-		/*template<class _component_storage_desc_t>
+		template<class _component_storage_desc_t>
 		auto const_view() {
 			return component_registry.const_view(_component_storage_desc_t{});
-		}*/
+		}
 
-		/*template<class _component_storage_desc_t>
+		template<class _component_storage_desc_t>
 		auto handles_view() {
 			return component_registry.handles_view(_component_storage_desc_t{});
-		}*/
+		}
 
-		/*template<class _component_storage_desc_t>
+		template<class _component_storage_desc_t>
 		void clear_components() {
 			component_registry.clear(_component_storage_desc_t{});
-		}*/
+		}
 
 		void clear_components() {
 			component_registry.clear();
@@ -1925,7 +1926,6 @@ void main() {
 		glm::vec3 color{};
 		float specular_strength{};
 		float shininess{};
-		resource_ref_t<vertex_array_t> vao;
 	};
 
 	struct basic_pass_t {
@@ -1942,8 +1942,7 @@ void main() {
 	struct offset_utility_t {
 		offset_utility_t(std::uint64_t _offset, std::uint64_t _alignment)
 			: offset{_offset}
-			, alignment{_alignment}
-		{
+			, alignment{_alignment} {
 			assert(std::has_single_bit(alignment));
 			offset = (offset + alignment - 1) & ~(alignment - 1);
 		}
@@ -1963,7 +1962,6 @@ void main() {
 	}
 
 	using basic_renderer_pass_desc_t = component_storage_desc_t<void, basic_pass_t, camera_t, omnidir_light_t>;
-	using basic_renderer_data_desc_t = component_storage_desc_t<void, transform_t, basic_material_t>;
 
 	class basic_renderer_system_t : public system_if_t {
 	public:
@@ -1973,7 +1971,7 @@ void main() {
 			std430_float specular_strength{};
 		};
 
-		static constexpr int max_instances = 300000;
+		static constexpr int max_instances = 500000;
 
 		basic_renderer_system_t(engine_ctx_t* ctx) : system_if_t(ctx) {
 			instanced_program = get_ctx()->get_resource<shader_program_t>("basic_instanced_program");
@@ -2073,49 +2071,42 @@ void main() {
 			glDrawArraysInstanced(sphere->mode, 0, sphere->count, prev_frame_submitted);
 		}
 
-		void swap_buffers() {
-			render_prev_buffer ^= 1;
-			prev_frame_submitted = next_frame_submitted;
-		}
-
-		void submit_next_frame() {
-			auto* ctx = get_ctx();
-
-			auto* mats = (glm::mat4*)advance_ptr(instance_buffer->mapped_pointer, render_prev_buffer ? mats_offset_next : mats_offset_prev);
-			auto* mtls = (std430_basic_material_t*)advance_ptr(instance_buffer->mapped_pointer, render_prev_buffer ? mtls_offset_next : mtls_offset_prev);
-
-			int object_count = 0;
-			for (auto [handle, transform, material] : ctx->view<basic_renderer_data_desc_t>()) {
-				mats[object_count] = transform.to_mat4();
-
-				auto& mtl = mtls[object_count];
-				mtl.color = material.color;
-				mtl.shininess = material.shininess;
-				mtl.specular_strength = material.specular_strength;
-
-				object_count++;
-				if (object_count >= max_instances) {
-					break;
-				}
-			}
-
-			next_frame_submitted = object_count;
-
-			instance_buffer->flush(render_prev_buffer ? mats_offset_next : mats_offset_prev, next_frame_submitted * sizeof(glm::mat4));
-			instance_buffer->flush(render_prev_buffer ? mtls_offset_next : mtls_offset_prev, next_frame_submitted * sizeof(std430_basic_material_t));
-		}
-
+	public:
 		void render_prev_frame() {
 			for (auto [handle, pass, camera, light] : get_ctx()->view<basic_renderer_pass_desc_t>()) {
 				render_pass_instanced(&pass, &camera, &light);
 			}
 		}
 
-	public:
-		void update() {
-			swap_buffers();
-			render_prev_frame();
-			submit_next_frame();
+		struct submit_region_t {
+			glm::mat4* mat{};
+			std430_basic_material_t* mtl{};
+			int count{};
+			int global_start{};
+		};
+
+		submit_region_t submit_next_frame(int count) {
+			int global_start = next_frame_submitted.fetch_add(count);
+			int insts_count = std::min(max_instances, global_start + count) - global_start;
+			int mat_offset = (render_prev_buffer ? mats_offset_next : mats_offset_prev) + global_start * sizeof(glm::mat4);
+			int mtl_offset = (render_prev_buffer ? mtls_offset_next : mtls_offset_prev) + global_start * sizeof(std430_basic_material_t);
+			return {
+				(glm::mat4*)advance_ptr(instance_buffer->mapped_pointer, mat_offset),
+				(std430_basic_material_t*)advance_ptr(instance_buffer->mapped_pointer, mtl_offset),
+				insts_count,
+				global_start
+			};
+		}
+
+		void finish_next_frame() {
+			int submitted = std::min(next_frame_submitted.load(std::memory_order_relaxed), max_instances);
+			next_frame_submitted.store(0, std::memory_order_relaxed);
+
+			instance_buffer->flush(render_prev_buffer ? mats_offset_next : mats_offset_prev, submitted * sizeof(glm::mat4));
+			instance_buffer->flush(render_prev_buffer ? mtls_offset_next : mtls_offset_prev, submitted * sizeof(std430_basic_material_t));
+
+			prev_frame_submitted = submitted;
+			render_prev_buffer ^= 1;
 		}
 
 	private:
@@ -2134,8 +2125,8 @@ void main() {
 		std::uint64_t mtls_offset_next{};
 		std::uint64_t mtls_size{};
 
+		std::atomic<int> next_frame_submitted{};
 		int prev_frame_submitted{};
-		int next_frame_submitted{};
 		int render_prev_buffer{};
 	};
 
@@ -2188,69 +2179,548 @@ void main() {
 	};
 
 
-	struct aabb_t {
-		glm::vec3 min{};
-		glm::vec3 max{};
+	struct particle_t {
+		glm::vec3 pos{};
+		glm::vec3 vel{};
 	};
 
-	struct sphere_t {
-		glm::vec3 center{};
-		float radius{};
+	struct attractor_t {
+		glm::vec3 pos{};
+		float GM{};
 	};
 
-	bool test_intersection_aabb_aphere(const aabb_t& aabb, const sphere_t& sphere) {
-		glm::vec3 dr = sphere.center - glm::clamp(sphere.center, aabb.min, aabb.max);
-		return dr.x * dr.x + dr.y * dr.y + dr.z * dr.z <= sphere.radius * sphere.radius;
-	}
+	struct physics_system_settings_t {
+		float eps{};
+		float dt_step{};
+		int max_particles{};
+		float particle_r{};
+		float particle_repulse_coef{};
+		int heavy_cell_thresh{};
+		int updates_per_frame{};
+	};
 
-	bool test_intersection_aabb_aabb(const aabb_t& aabb1, const aabb_t& aabb2) {
-		return glm::all(glm::lessThanEqual(aabb1.min, aabb2.max) && glm::lessThanEqual(aabb2.min, aabb1.max));
-	}
-
-	bool test_intersection_aabb_point(const aabb_t& aabb, const glm::vec3& point) {
-		return glm::all(glm::lessThanEqual(aabb.min, point) && glm::lessThanEqual(point, aabb.max));
-	}
-
-	// TODO : reimplement
+	// TODO : simd
 	class physics_system_t : public system_if_t {
 	public:
-		physics_system_t(engine_ctx_t* ctx): system_if_t(ctx) {}
+		friend class sparse_grid_ops_t;
+
+		struct sparse_grid_ops_t {
+			sparse_cell_t cell(int id) const {
+				return get_sparse_cell(ctx->particles[id].pos, ctx->grid_scale);
+			}
+
+			std::uint32_t hash(int id) const {
+				return hash(cell(id));
+			}
+
+			std::uint32_t hash(const sparse_cell_t& cell) const {
+				return sparse_cell_hasher_t{}(cell);
+			}
+
+			bool equals(int id1, int id2) const {
+				return cell(id1) == cell(id2);
+			}
+
+			bool equals(int id, const sparse_cell_t& c) const {
+				return cell(id) == c;
+			}
+
+			physics_system_t* ctx{};
+		};
+
+		using sparse_grid_t = lofi_hashtable1_t<sparse_grid_ops_t>;
+
+		enum update_phase_t {
+			PrepareSparseGrid,
+			BuildSparseGrid,
+			ReorderData,
+			UpdateLightCells,
+			UpdateHeavyCells,
+			SubmitToRender,
+			UpdatePhaseCount,
+		};
+
+		friend struct update_job_t;
+
+		struct update_job_t : job_if_t {
+			update_job_t(physics_system_t* _ctx, int _job_id)
+				: ctx{_ctx}
+				, job_id{_job_id}
+			{}
+
+			void execute() override {
+				ctx->execute_job(this);
+			}
+
+			physics_system_t* ctx{};
+			int job_id{};
+		};
+
+		struct sparse_neighbours_t {
+			static constexpr int offset_count = 26;
+
+			static constexpr const sparse_cell_t offsets[26] = {
+				sparse_cell_t{-1, -1, -1},
+				sparse_cell_t{0, -1, -1},
+				sparse_cell_t{1, -1, -1},
+				sparse_cell_t{-1, 0, -1},
+				sparse_cell_t{0, 0, -1},
+				sparse_cell_t{1, 0, -1},
+				sparse_cell_t{-1, 1, -1},
+				sparse_cell_t{0, 1, -1},
+				sparse_cell_t{1, 1, -1},
+				
+				sparse_cell_t{-1, -1, 0},
+				sparse_cell_t{0, -1, 0},
+				sparse_cell_t{1, -1, 0},
+				sparse_cell_t{-1, 0, 0},
+				// sparse_cell_t{0, 0, 0}, // center cell
+				sparse_cell_t{1, 0, 0},
+				sparse_cell_t{-1, 1, 0},
+				sparse_cell_t{0, 1, 0},
+				sparse_cell_t{1, 1, 0},
+
+				sparse_cell_t{-1, -1, 1},
+				sparse_cell_t{0, -1, 1},
+				sparse_cell_t{1, -1, 1},
+				sparse_cell_t{-1, 0, 1},
+				sparse_cell_t{0, 0, 1},
+				sparse_cell_t{1, 0, 1},
+				sparse_cell_t{-1, 1, 1},
+				sparse_cell_t{0, 1, 1},
+				sparse_cell_t{1, 1, 1},
+			};
+
+			static sparse_cell_t neighbour(const sparse_cell_t& c, int i) {
+				return c + offsets[i];
+			}
+
+			int center{};
+			int neighbours[26] = {};
+		};
+
+		// TODO : looks like little mess
+		physics_system_t(engine_ctx_t* ctx, const physics_system_settings_t& settings)
+			: system_if_t(ctx)
+			, eps{settings.eps}
+			, dt_step{settings.dt_step}
+			, grid_scale{1.0f / settings.particle_r}
+			, max_particles{settings.max_particles}
+			, particle_r{settings.particle_r}
+			, particle_repulse_coef{settings.particle_repulse_coef}
+			, heavy_cell_thresh{settings.heavy_cell_thresh}
+			, updates_per_frame{settings.updates_per_frame}
+
+			, sparse_grid{settings.max_particles, sparse_grid_ops_t{this}}
+			, used_buckets{max_particles}
+			, heavy_buckets{max_particles}
+			, particles_reordered{std::make_unique<particle_t[]>(max_particles)}
+			, colors_reordered{std::make_unique<glm::vec3[]>(max_particles)}
+		{
+			auto* thread_pool = get_ctx()->get_system<thread_pool_system_t>("thread_pool");
+			for (int i = 0; i < thread_pool->worker_count(); i++) {
+				update_jobs.push_back(std::make_unique<update_job_t>(this, i));
+			}
+
+			auto* imgui = get_ctx()->get_system<imgui_system_t>("imgui");
+			imgui->register_callback([&] (){
+				ImGui::SetNextWindowSize(ImVec2{256, 256}, ImGuiCond_Once);
+				if (ImGui::Begin("physics")) {
+					ImGui::Text("particles: %d", (int)particles.size());
+					ImGui::Text("attractors: %d", (int)attractors.size());
+
+					ImGui::DragFloat("##repulse_coef", &particle_repulse_coef, 1.0f, 0.0f, 1000.0f, "repulse coef: %.1f");
+					ImGui::DragFloat("##dt_step", &dt_step, 0.0001f, 0.0f, 0.1f, "dt step: %.4f");
+
+					if (ImGui::DragFloat("##particle_r", &particle_r, 0.001f, 0.001f, 1.0f, "particle r: %.3f")) {
+						grid_scale = 1.0f / particle_r;
+					}
+
+					ImGui::DragInt("##updates_per_frame", &updates_per_frame, 1.0f, 0, 100, "updates per frame: %d");
+					ImGui::DragInt("##heavy_bucket_thresh", &heavy_cell_thresh, 1000.0f, 0, 1000000, "heavy cell thresh: %d");
+
+					if (ImGui::CollapsingHeader("attractors")) {
+						for (int i = 0; i < attractors.size(); i++) {
+							ImGui::PushID(i);
+							attractor_t& attractor = attractors[i];
+							ImGui::InputFloat3("pos", glm::value_ptr(attractor.pos));
+							ImGui::DragFloat("##GM", &attractor.GM, 10.0f, -1e5, +1e5);
+							ImGui::PopID();
+						}
+					}
+				}
+				ImGui::End();
+				return true;
+			});
+		}
+
+		void update(float dt) {
+			if (particles.empty()) {
+				return;
+			}
+
+			for (int i = 0; i < updates_per_frame; i++) {
+				sparse_grid.reset_size(particles.size());
+				used_buckets.reset();
+				heavy_buckets.reset();
+				reordered_count.store(0, std::memory_order_relaxed);
+
+				dispatch_jobs(PrepareSparseGrid);
+				dispatch_jobs(BuildSparseGrid);
+				dispatch_jobs(ReorderData);
+				dispatch_jobs(UpdateLightCells);
+				//dispatch_jobs(UpdateHeavyCells);
+			}
+			dispatch_jobs(SubmitToRender);
+		}
+
+	private:
+		void dispatch_jobs(update_phase_t phase) {
+			update_phase = phase;
+
+			auto* thread_pool = get_ctx()->get_system<thread_pool_system_t>("thread_pool");
+			for (auto& job : update_jobs) {
+				thread_pool->push_job(job.get());
+			}
+			for (auto& job : update_jobs) {
+				job->wait();
+			}
+		}
+
+		void execute_job(update_job_t* job) {
+			switch (update_phase) {
+				case PrepareSparseGrid: {
+					prepare_sparse_grid(job);
+					break;
+				}
+
+				case BuildSparseGrid: {
+					build_sparse_grid(job);
+					break;
+				}
+
+				case ReorderData: {
+					reorder_data(job);
+					break;
+				}
+
+				case UpdateLightCells: {
+					update_light_cells(job);
+					break;
+				}
+
+				/*case UpdateHeavyCells: {
+					update_heavy_cells(job);
+					break;
+				}*/
+
+				case SubmitToRender: {
+					submit_to_render(job);
+					break;
+				}
+			}
+		}
+
+		void prepare_sparse_grid(update_job_t* job) {
+			auto [start, stop] = compute_job_range(sparse_grid.get_buckets_count(), update_jobs.size(), job->job_id);
+
+			lofi_bucket_t* buckets = sparse_grid.get_buckets_data();
+			while (start != stop) {
+				buckets[start++].reset();
+			}
+		}
+
+		void build_sparse_grid(update_job_t* job) {
+			auto [start, stop] = compute_job_range(std::min((int)particles.size(), max_particles), update_jobs.size(), job->job_id);
+
+			constexpr int batch_size = 256;
+
+			static_vector_t<int, batch_size> buckets{};
+			while (start != stop) {
+				int next_stop = std::min(start + batch_size, stop);
+				while (start != next_stop) {
+					auto [bucket, scans] = sparse_grid.put(start);
+					assert(scans != -1);
+					if (bucket != -1) {
+						buckets.push_back(bucket);
+					}
+					start++;
+				}
+
+				if (!buckets.empty()) {
+					int* insert_place = used_buckets.push(buckets.size());
+					assert(insert_place);
+					std::memcpy(insert_place, buckets.data(), buckets.size() * sizeof(int));
+					buckets.reset();
+				}
+			}
+		}
+
+		void reorder_data(update_job_t* job) {
+			auto [start, stop] = compute_job_range(used_buckets.get_size(), update_jobs.size(), job->job_id);
+
+			int total_inserted = 0;
+			for (int i = start; i < stop; i++) {
+				total_inserted += sparse_grid.get_bucket(used_buckets[i]).get_count();
+			}
+
+			int base_index = reordered_count.fetch_add(total_inserted, std::memory_order_relaxed);
+			for (int i = start; i < stop; i++) {
+				int new_head = base_index;
+				for (auto iter = sparse_grid.iter(used_buckets[i]); iter.valid(); iter.next()) {
+					particles_reordered[base_index] = particles[iter.get()];
+					colors_reordered[base_index] = colors[iter.get()];
+					base_index++;
+				}
+				// set head to the start of the consequent range
+				sparse_grid.get_bucket(used_buckets[i]).head.store(new_head, std::memory_order_relaxed);
+			}
+		}
+
+		void update_light_cells(update_job_t* job) {
+			constexpr int batch_size = 256;
+
+			auto [start, stop] = compute_job_range(used_buckets.get_size(), update_jobs.size(), job->job_id);
+
+			static_vector_t<int, batch_size> heavy_buckets_batch;
+			for (int i = start; i < stop; i++) {
+				lofi_bucket_t& bucket = sparse_grid.get_bucket(used_buckets[i]);
+		
+				sparse_neighbours_t neighbours = get_neighbours(used_buckets[i]);
+				//if (compute_cell_work_amount(neighbours) < heavy_cell_thresh) {
+					update_cell(neighbours, 0, bucket.get_count());
+				/*} else {
+					if (heavy_buckets_batch.can_push()) {
+						heavy_buckets_batch.push_back(neighbours.center);
+					} else {
+						int* insert_place = heavy_buckets.push(heavy_buckets_batch.size());
+						std::memcpy(insert_place, heavy_buckets_batch.data(), sizeof(int) * heavy_buckets_batch.size());
+						heavy_buckets_batch.reset();
+					}
+				}*/
+			}
+
+			if (!heavy_buckets_batch.empty()) {
+				int* insert_place = heavy_buckets.push(heavy_buckets_batch.size());
+				std::memcpy(insert_place, heavy_buckets_batch.data(), sizeof(int) * heavy_buckets_batch.size());
+				heavy_buckets_batch.reset();
+			}
+		}
+
+		/*std::int64_t compute_cell_work_amount(const sparse_neighbours_t& neighbours) {
+			std::int64_t center_count = sparse_grid.get_bucket(neighbours.center).get_count();
+			std::int64_t total_work = center_count * (center_count + 1);
+			for (int neighbour : neighbours.neighbours) {
+				if (neighbour == -1) {
+					continue;
+				}
+				total_work += sparse_grid.get_bucket(neighbour).get_count() * center_count;
+			}
+			return total_work;
+		}*/
+
+		/*void update_heavy_cells(update_job_t* job) {
+			int count = heavy_buckets.get_size();
+			for (int i = 0; i < count; i++) {
+				lofi_bucket_t& bucket = sparse_grid.get_bucket(heavy_buckets[i]);
+
+				auto [start, stop] = compute_job_range(bucket.get_count(), update_jobs.size(), job->job_id);
+				if (start >= stop) {
+					continue;
+				}
+
+				sparse_neighbours_t neighbours = get_neighbours(heavy_buckets[i]);
+				update_cell(neighbours, start, stop);
+			}
+		}*/
+
+		void submit_to_render(update_job_t* job) {
+			auto [start, stop] = compute_job_range(particles.size(), update_jobs.size(), job->job_id);
+			if (start >= stop) {
+				return;
+			}
+
+			auto* renderer = get_ctx()->get_system<basic_renderer_system_t>("basic_renderer");
+			auto region = renderer->submit_next_frame(stop - start);
+
+			for (int i = 0; i < region.count; i++) {
+				glm::mat4 mat{particle_r};
+				mat[3] = glm::vec4(particles[start + i].pos, 1.0f); // TODO : very ugly
+				region.mat[i] = mat;
+
+				auto& mtl = region.mtl[i];
+				mtl.color = colors[start + i];
+				mtl.shininess = 64.0f;
+				mtl.specular_strength = 1.0f;
+			}
+		}
+
+		sparse_neighbours_t get_neighbours(int bucket_index) {
+			lofi_bucket_t& bucket = sparse_grid.get_bucket(bucket_index);
+			int head = bucket.get_head();
+
+			sparse_cell_t center = get_sparse_cell(particles[head].pos, grid_scale);
+
+			sparse_neighbours_t neighbours{bucket_index};
+			for (int i = 0; i < sparse_neighbours_t::offset_count; i++) {
+				neighbours.neighbours[i] = sparse_grid.get(sparse_neighbours_t::neighbour(center, i));
+			}
+			return neighbours;
+		}
+
+		struct cell_data_t {
+			particle_t* particles_updated{};
+			particle_t* particles_reordered{};
+			glm::vec3* colors{};
+			glm::vec3* colors_reordered{};
+			int count{};
+		};
+
+		cell_data_t get_cell_data(int cell) {
+			lofi_bucket_t& bucket = sparse_grid.get_bucket(cell);
+			int offset = bucket.get_head();
+			int count = bucket.get_count();
+			return {
+				particles.data() + offset,
+				particles_reordered.get() + offset,
+				colors.data() + offset,
+				colors_reordered.get() + offset,
+				count
+			};
+		}
+
+		void update_cell(const sparse_neighbours_t& neighbours, int start, int stop) {
+			auto center_cell_data = get_cell_data(neighbours.center);
+			for (int i = start; i < stop; i++) {
+				glm::vec3 acc{};
+				particle_t& curr_particle = center_cell_data.particles_reordered[i];
+
+				for (int neighbour : neighbours.neighbours) {
+					if (neighbour == -1) {
+						continue;
+					}
+
+					auto neighbour_cell_data = get_cell_data(neighbour);
+					for (int j = 0; j < neighbour_cell_data.count; j++) {
+						acc += spring_force_on_by(curr_particle.pos, neighbour_cell_data.particles_reordered[j].pos);
+					}
+				}
+				
+				for (int j = 0; j < center_cell_data.count; j++) {
+					if (i == j) {
+						continue;
+					}
+					acc += spring_force_on_by(curr_particle.pos, center_cell_data.particles_reordered[j].pos);
+				}
+
+				acc += env_force(curr_particle.pos, curr_particle.vel);
+
+				particle_t& updated_particle = center_cell_data.particles_updated[i];
+				std::tie(updated_particle.pos, updated_particle.vel) = integrate_motion(curr_particle.pos, curr_particle.vel, acc);
+				center_cell_data.colors[i] = center_cell_data.colors_reordered[i];
+			}
+		}
+
+		// TODO : can be used to compute force on both particles (good idea but it does not seem to be the bottleneck)
+		glm::vec3 spring_force_on_by(const glm::vec3& on, const glm::vec3& by) {
+			glm::vec3 dr = on - by;
+			float r = glm::length(dr);
+			if (r < eps) {
+				return glm::vec3{};
+			}
+			dr *= 1.0f / r;
+
+			float l = r;
+			float l0 = 2.0f * particle_r;
+			float dl = l0 - std::min(l, l0);
+			float k = particle_repulse_coef;
+
+			return (k * dl) * dr; // spring-like
+		}
+
+		glm::vec3 env_force(const glm::vec3& pos, const glm::vec3& vel) {
+			glm::vec3 acc{};
+			for (auto& attractor : attractors) {
+				glm::vec3 dr = pos - attractor.pos;
+				float r = glm::length(dr);
+				if (r < 5.0f) {
+					return -vel * std::sqrt(5.0f / r - 1.0f);
+				}
+				float ri = 1.0f / r;
+				acc -= (attractor.GM * ri * ri) * (dr * ri);
+			}
+			return acc;
+		}
+		
+		// TODO : this is ugly
+		// TODO : split to integrate & contraint
+		std::tuple<glm::vec3, glm::vec3> integrate_motion(const glm::vec3 r0, const glm::vec3& v0, const glm::vec3& a) {
+			glm::vec3 v1 = v0 + dt_step * a;
+			glm::vec3 r1 = r0 + dt_step * v1;
+			if (float r = glm::length(r1); r > 200.0f) {
+				v1 = r1 * (-1.0f / r);
+			}
+			return {r1, v1};
+		}
+
+	public:
+		void add_particle(const glm::vec3& pos, const glm::vec3& vel, const glm::vec3& color) {
+			particles.push_back({pos, vel});
+			colors.push_back(color);
+		}
+
+		void add_attractor(const attractor_t& attractor) {
+			attractors.push_back(attractor);
+		}
+
+	private:
+		float eps{};
+		float dt_step{};
+		float grid_scale{};
+		const int max_particles;
+		float particle_r{};
+		float particle_repulse_coef{};
+		int heavy_cell_thresh{};
+		int updates_per_frame{};
+
+		std::vector<attractor_t> attractors{};
+		std::vector<particle_t> particles{};
+		std::vector<glm::vec3> colors{};
+
+		sparse_grid_t sparse_grid; 
+		lofi_stack_t<int> used_buckets;
+		lofi_stack_t<int> heavy_buckets;
+		std::unique_ptr<particle_t[]> particles_reordered;
+		std::unique_ptr<glm::vec3[]> colors_reordered;
+		std::atomic<int> reordered_count{};
+
+		std::vector<std::unique_ptr<update_job_t>> update_jobs;
+		update_phase_t update_phase{};
 	};
 
-	struct level_system_info_t {
+
+	struct level_system_settings_t {
 		int balls_count{};
 	};
 
 	class level_system_t : public system_if_t {
 		void spawn_balls(int count) {
-			float r = 0.25f;
-
-			transform_t transform = {
-				.base = glm::mat4(1.0f),
-				.scale = glm::vec3(r),
-				.rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f),
-				.translation = glm::vec3(0.0f) 
-			};
-
-			basic_material_t material = {
-				.color = glm::vec3(1.0f, 1.0f, 1.0f),
-				.specular_strength = 1.0f,
-				.shininess = 64.0f,
-			};
-
+			auto* physics = get_ctx()->get_system<physics_system_t>("physics");
 			for (int i = 0; i < count; i++) {
-				material.color = color_gen.gen();
-				transform.translation = glm::vec3{coord_gen.gen(), coord_gen.gen(), coord_gen.gen()};
-
-				entity_t ball = entity_t(get_ctx());
-				ball.emplace<basic_renderer_data_desc_t>(transform, material);
-
-				ball_handles.push_back(ball.get_handle());
+				glm::vec3 color = color_gen.gen();
+				glm::vec3 pos = glm::vec3{coord_gen.gen(), coord_gen.gen(), coord_gen.gen()};
+				glm::vec3 vel{};
+				physics->add_particle(pos, vel, color);
 			}
+			balls_count += count;
 		}
 
-		void create_balls() {
-			spawn_balls(balls_count);
+		void create_attractors() {
+			auto* physics = get_ctx()->get_system<physics_system_t>("physics");
+			physics->add_attractor({
+				.pos = glm::vec3{0.0f, 0.0f, 0.0f},
+				.GM = 1000.0f
+			});
 		}
 
 		void create_basic_pass() {
@@ -2266,7 +2736,7 @@ void main() {
 
 			omnidir_light_t light = {
 				.ambient = glm::vec3(0.2f),
-				.color = glm::vec3(10.0f),
+				.color = glm::vec3(15.0f),
 				.pos = glm::vec3(0.0f),
 			};
 
@@ -2327,7 +2797,7 @@ void main() {
 
 		bool level_control_gui() {
 			if (ImGui::Begin("level: controls")) {
-				ImGui::Text("balls: %d", (int)ball_handles.size());
+				ImGui::Text("balls: %d", balls_count);
 
 				ImGui::SetNextItemWidth(100.0f);
 				ImGui::InputInt("##balls_to_spawn", &balls_count_gui);
@@ -2343,7 +2813,6 @@ void main() {
 		void create_shitty_gui() {
 			auto* ctx = get_ctx();
 			framebuffer_texture = ctx->get_resource<texture_t>("color");
-
 			if (auto* imgui_system = ctx->get_system<imgui_system_t>("imgui")) {
 				imgui_system->register_callback([&](){
 					return framebuffer_gui();
@@ -2355,19 +2824,16 @@ void main() {
 		}
 
 	public:
-		level_system_t(engine_ctx_t* ctx, const level_system_info_t& info)
-			: system_if_t(ctx)
-			, balls_count{info.balls_count} {
-			create_balls();
+		level_system_t(engine_ctx_t* ctx, const level_system_settings_t& settings)
+			: system_if_t(ctx) {
+			spawn_balls(settings.balls_count);
+			create_attractors();
 			create_passes();
 			create_shitty_gui();
 		}
 
 		~level_system_t() {
 			auto* ctx = get_ctx();
-			for (auto& ball : ball_handles) {
-				ctx->release(ball);
-			}
 
 			ctx->release(basic_pass_handle);
 			ctx->release(imgui_pass_handle);
@@ -2377,7 +2843,7 @@ void main() {
 		}
 
 		void update() {
-			float t = glfw::get_time() * 0.4f;
+			float t = glfw::get_time() * 0.1f;
 
 			entity_t basic_pass{get_ctx(), basic_pass_handle};
 			auto [pass, camera, light] = basic_pass.get<basic_renderer_pass_desc_t>();
@@ -2385,7 +2851,6 @@ void main() {
 		}
 
 	private:
-		std::vector<handle_t> ball_handles;
 		hsv_to_rgb_color_gen_t color_gen{42};
 		float_gen_t coord_gen{42, -30.0f, +30.0f};
 		handle_t basic_pass_handle{};
@@ -2411,10 +2876,6 @@ void main() {
 			constexpr int tex_width = 1280;
 			constexpr int tex_height = 720;
 
-			level_system_info_t level_info{
-				.balls_count = 10000,
-			};
-
 			thread_pool = std::make_shared<thread_pool_system_t>(ctx, 24);
 			ctx->add_system("thread_pool", thread_pool);
 
@@ -2430,13 +2891,27 @@ void main() {
 			basic_renderer_system = std::make_shared<basic_renderer_system_t>(ctx);
 			ctx->add_system("basic_renderer", basic_renderer_system);
 
-			physics_system = std::make_shared<physics_system_t>(ctx);
+			physics_system_settings_t physics_settings{
+				.eps = 1e-6f,
+				.dt_step = 1e-3f,
+				.max_particles = 1 << 19,
+				.particle_r = 2.0f,
+				.particle_repulse_coef = 10.0f,
+				.heavy_cell_thresh = 10000,
+				.updates_per_frame = 4,
+			};
+
+			physics_system = std::make_shared<physics_system_t>(ctx, physics_settings);
 			ctx->add_system("physics", physics_system);
 
 			timer_system = std::make_shared<timer_system_t>(ctx);
 			ctx->add_system("timer", timer_system);
 
-			level_system = std::make_shared<level_system_t>(ctx, level_info);
+			level_system_settings_t level_settings{
+				.balls_count = 1000,
+			};
+
+			level_system = std::make_shared<level_system_t>(ctx, level_settings);
 			ctx->add_system("level", level_system);
 
 			sync_component_system = std::make_shared<sync_component_system_t>(ctx);
@@ -2486,20 +2961,27 @@ void main() {
 			auto& timer = *timer_system;
 			auto& level = *level_system;
 
-			float dt = 0.002f;
-
 			glfwSwapInterval(0);
+
+			double t0 = glfwGetTime();
 			while (!window.should_close()) {
+				double t1 = glfwGetTime();
+				float dt = t1 - t0;
+				t0 = t1;
+
 				window.swap_buffers();
 
 				glfw::poll_events();
 
+				basic_renderer.render_prev_frame();
+
+				physics.update(dt);
 				timer.update(dt);
-				//physics.update(dt);
-				basic_renderer.update();
 				imgui.update();
 				level.update();
 				sync.update();
+
+				basic_renderer.finish_next_frame();
 			}
 		}
 
@@ -2533,65 +3015,11 @@ void main() {
 		std::unique_ptr<mainloop_if_t> mainloop;
 	};
 
-	// TODO : rework & enhance little bit the component storage
-	// TODO : multithreaded render data submission
-	// TODO : mutltithreaded physics update
-	// TODO : optimize sphere mesh
-	// 
-	// TODO : simplify hash function, maybe use simd there
-	// 
-	// TODO : script_system
-	// TODO : simple timer system
-	// TODO : ball_spawner_system_t
-	
-	///...
-
 	// TODO : point of no return - next iteration
 }
 
 
 // some pile of shit (tests)
-void test_octotree_stuff() {
-	aabb_t box{glm::vec3{0.0f}, glm::vec3{3.0f}};
-
-	// box-box
-	aabb_t box1{glm::vec3{-1.0, 1.0f, 1.0f}, glm::vec3{4.0f, 2.0f, 2.0f}};
-	aabb_t box2{glm::vec3{1.0f, -1.0f, 1.0f}, glm::vec3{2.0f, 4.0f, 2.0f}};
-	aabb_t box3{glm::vec3{1.0f, 1.0f, -1.0f}, glm::vec3{2.0f, 2.0f, 4.0f}};
-	aabb_t box4{glm::vec3{4.0f}, glm::vec3{5.0f}};
-	aabb_t box5{glm::vec3{-2.0f}, glm::vec3{-1.0f}};
-	aabb_t box6{glm::vec3{3.0f}, glm::vec3{4.0f}};
-
-	assert_check(test_intersection_aabb_aabb(box, box), "box-box: must intersect");
-	assert_check(test_intersection_aabb_aabb(box, box1), "box-box: must intersect");
-	assert_check(test_intersection_aabb_aabb(box, box2), "box-box: must intersect");
-	assert_check(test_intersection_aabb_aabb(box, box3), "box-box: must intersect");
-
-	assert_check(!test_intersection_aabb_aabb(box, box4), "box-box: must not intersect");
-	assert_check(!test_intersection_aabb_aabb(box, box5), "box-box: must not intersect");
-
-	assert_check(test_intersection_aabb_aabb(box, box6), "box-box: must intersect");
-
-	// box-point
-	glm::vec3 p1{4.0f};
-	glm::vec3 p2{-1.0f};
-	glm::vec3 p3{1.0f, 1.0f, 4.0f};
-	glm::vec3 p4{1.0f, 4.0f, 1.0f};
-	glm::vec3 p5{4.0f, 1.0f, 1.0f};
-	glm::vec3 p6{1.0f};
-	glm::vec3 p7{3.0f};
-
-	assert_check(!test_intersection_aabb_point(box, p1), "box-point: must not intersect");
-	assert_check(!test_intersection_aabb_point(box, p2), "box-point: must not intersect");
-	assert_check(!test_intersection_aabb_point(box, p3), "box-point: must not intersect");
-	assert_check(!test_intersection_aabb_point(box, p4), "box-point: must not intersect");
-	assert_check(!test_intersection_aabb_point(box, p5), "box-point: must not intersect");
-	assert_check(test_intersection_aabb_point(box, p6), "box-point: must intersect");
-	assert_check(test_intersection_aabb_point(box, p7), "box-point: must intersect");
-
-	std::cout << "octotree tests passed\n";
-}
-
 void test_sparse_grid_hash() {
 	auto hash = sparse_cell_hasher_t{};
 

@@ -64,11 +64,6 @@ struct job_if_t {
 	bool ready_status{};
 };
 
-struct dummy_job_t : public job_if_t {
-	void execute() override
-	{}
-};
-
 template<class func_t>
 struct func_job_t : public job_if_t {
 	template<class _func_t>		
@@ -90,6 +85,8 @@ func_job_t(func_t&& func) -> func_job_t<func_t>;
 // you submit some set of jobs
 // you wait for them
 // you cannot drop thread jobs
+// you'd better not push the same job more then once (so only one thread can execute the job)
+// you are not allowed to push nullptr: it is a special value that will terminate a worker
 struct thread_pool_t {
 	static constexpr int thread_count_fallback = 8;
 
@@ -105,11 +102,8 @@ struct thread_pool_t {
 	}
 
 	~thread_pool_t() {
-		terminating.store(true, std::memory_order_relaxed); // queue will sync variable 'terminating' due to acquire-release in the underlying mutex
-
-		std::vector<dummy_job_t> dummy_jobs(workers.size());
-		for (auto& job : dummy_jobs) {
-			push_job(&job);
+		for (int i = 0; i < workers.size(); i++) {
+			job_queue.push(nullptr);
 		}
 
 		std::unique_lock lock_guard{lock};
@@ -124,8 +118,11 @@ struct thread_pool_t {
 	}
 
 	void thread_pool_worker_func() {
-		while (!terminating.load(std::memory_order_relaxed)) { // will be synced in a destructor
+		while (true) {
 			job_if_t* job = job_queue.pop();
+			if (!job) {
+				break;
+			}
 			job->execute();
 			job->set_ready();
 		}
@@ -139,11 +136,14 @@ struct thread_pool_t {
 		job_queue.push(job);
 	}
 
+	int worker_count() const {
+		return workers.size();
+	}
+
 	std::vector<std::thread> workers;
 	mt_queue_t<job_if_t*> job_queue;
 
 	std::mutex lock;
 	std::condition_variable worker_terminated;
 	int workers_terminated{};
-	std::atomic<bool> terminating{};
 };

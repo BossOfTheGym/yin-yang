@@ -2,9 +2,12 @@
 
 // indices from range [-2^31 + 1, to 2^31 - 2]
 inline constexpr int sparse_cell_base = 1 << 30;
+inline constexpr int sparse_cell_max = INT_MAX - 1;
+inline constexpr int sparse_cell_min = INT_MIN + 1;
 
 using sparse_cell_t = glm::ivec3;
 
+// TODO : simd
 struct sparse_cell_hasher_t {
 	static std::uint32_t h32(std::uint32_t h) {
 		h ^= (h >> 16);
@@ -29,7 +32,8 @@ struct sparse_cell_equals_t {
 	}
 };
 
+// TODO : simd
 // cell_scale = 1.0f / cell_size
-inline sparse_cell_t get_sparse_cell(const glm::vec3& point, float cell_scale, float cell_min, float cell_max) {
-	return glm::clamp(glm::floor(point * cell_scale), glm::vec3{cell_min}, glm::vec3{cell_max});
+inline sparse_cell_t get_sparse_cell(const glm::vec3& point, float cell_scale) {
+	return glm::clamp(glm::floor(point * cell_scale), glm::vec3(sparse_cell_min), glm::vec3(sparse_cell_max));
 }

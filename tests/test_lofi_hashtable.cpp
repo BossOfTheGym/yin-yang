@@ -36,7 +36,38 @@ struct lofi_test_settings_t {
 	bool should_shuffle{};
 
 	bool should_test_std{};
+	bool should_check_hashtable{};
  };
+
+struct hashtable_ops_t {
+	template<class ctx_t>
+	using hash_func_t = std::uint32_t(ctx_t*, int);
+
+	template<class ctx_t>
+	using equals_func_t = bool(ctx_t*, int, int);
+
+	template<class ctx_t>
+	hashtable_ops_t(ctx_t* _ctx, hash_func_t<ctx_t>* _hash_func, equals_func_t<ctx_t>* _equals_func)
+		: ctx{_ctx}
+		, hash_func((hash_func_t<void>*)_hash_func)
+		, equals_func((equals_func_t<void>*)_equals_func)
+	{}
+
+	std::uint32_t hash(int item) const {
+		return hash_func(ctx, item);
+	}
+
+	bool equals(int item1, int item2) const {
+		return equals_func(ctx, item1, item2);
+	}
+
+	void* ctx{};
+	hash_func_t<void>* hash_func{};
+	equals_func_t<void>* equals_func{};
+};
+
+using test_hashtable1_t = lofi_hashtable1_t<hashtable_ops_t>;
+using test_hashtable2_t = lofi_hashtable2_t<hashtable_ops_t>;
 
 template<class hashtable_t>
 struct lofi_test_ctx_t {
@@ -78,10 +109,11 @@ struct lofi_test_ctx_t {
 		, repeat{settings.repeat}
 		, job_count{settings.job_count}
 		, total_cell_count{cell_count * repeat}
-		, hashtable{total_cell_count, lofi_hasher_t{this, hash}, lofi_equals_t{this, equals}}
+		, hashtable{total_cell_count, hashtable_ops_t{this, hash, equals}}
 		, used_buckets{total_cell_count}
 		, thread_pool{job_count}
-		, should_test_std{settings.should_test_std} {
+		, should_test_std{settings.should_test_std}
+		, should_check_hashtable{settings.should_check_hashtable} {
 
 		int_gen_t x_gen(settings.x_seed, settings.x_min, settings.x_max);
 		int_gen_t y_gen(settings.y_seed, settings.y_min, settings.y_max);
@@ -159,7 +191,11 @@ struct lofi_test_ctx_t {
 		}
 
 		double avg_scans = (double)total_scans / total_cell_count;
-		bool hashtable_valid = check_lofi_hashtable();
+
+		const char* check_status = "unchecked";
+		if (should_check_hashtable) {
+			check_status = check_lofi_hashtable() ? "valid" : "invalid";
+		}
 
 		json stats = json::object({
 			{"std_build", dt43},
@@ -172,7 +208,7 @@ struct lofi_test_ctx_t {
 			{"avg_scans", avg_scans},
 			{"total_inserted", inserted},
 			{"used_buckets", used_buckets.get_size()},
-			{"hashtable_valid", hashtable_valid},
+			{"hashtable_check", check_status},
 		});
 
 		return stats;
@@ -296,6 +332,7 @@ struct lofi_test_ctx_t {
 	int total_cell_count{};
 
 	bool should_test_std{};
+	bool should_check_hashtable{};
 
 	std::vector<sparse_cell_t> cells{};
 
@@ -335,6 +372,7 @@ void test_lofi_hashtable() {
 		.should_shuffle = true,
 
 		.should_test_std = false,
+		.should_check_hashtable = false
 	};
 
 	json basic_stats = json::object({
@@ -352,7 +390,7 @@ void test_lofi_hashtable() {
 	});
 
 	json stats1 = basic_stats;
-	lofi_test_ctx_t<lofi_hashtable1_t> ctx1{settings};
+	lofi_test_ctx_t<lofi_hashtable1_t<hashtable_ops_t>> ctx1{settings};
 	for (int i = 0; i < test_invocations; i++) {
 		stats1["stats"].push_back(ctx1.master());
 	}
@@ -362,7 +400,7 @@ void test_lofi_hashtable() {
 	}
 
 	json stats2 = basic_stats;
-	lofi_test_ctx_t<lofi_hashtable2_t> ctx2{settings};
+	lofi_test_ctx_t<lofi_hashtable1_t<hashtable_ops_t>> ctx2{settings};
 	for (int i = 0; i < test_invocations; i++) {
 		stats2["stats"].push_back(ctx2.master());
 	}
