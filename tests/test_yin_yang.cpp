@@ -934,10 +934,10 @@ void main() {
 			, im_insane{hardcore} {
 			glCreateBuffers(1, &buffer_id);
 
-			GLbitfield buffer_flags = GL_MAP_PERSISTENT_BIT | GL_MAP_WRITE_BIT;
+			GLbitfield buffer_flags = GL_MAP_PERSISTENT_BIT | GL_MAP_WRITE_BIT | GL_MAP_COHERENT_BIT;
 			glNamedBufferStorage(buffer_id, size, nullptr, buffer_flags);
 			
-			GLbitfield mapping_flags = GL_MAP_PERSISTENT_BIT | GL_MAP_WRITE_BIT | (hardcore ? GL_MAP_FLUSH_EXPLICIT_BIT : 0);
+			GLbitfield mapping_flags = GL_MAP_PERSISTENT_BIT | GL_MAP_WRITE_BIT | GL_MAP_COHERENT_BIT/*(hardcore ? GL_MAP_FLUSH_EXPLICIT_BIT : 0)*/;
 			mapped_pointer = glMapNamedBufferRange(buffer_id, 0, size, mapping_flags);
 		}
 
@@ -947,9 +947,9 @@ void main() {
 		}
 
 		void flush(std::uint64_t offset, std::uint64_t size) {
-			if (im_insane) {
+			/*if (im_insane) {
 				glFlushMappedNamedBufferRange(buffer_id, offset, size);
-			}
+			}*/
 		}
 
 		GLuint buffer_id{};
@@ -1963,6 +1963,10 @@ void main() {
 
 	using basic_renderer_pass_desc_t = component_storage_desc_t<void, basic_pass_t, camera_t, omnidir_light_t>;
 
+	struct basic_renderer_settings_t {
+		int max_instances{10000};
+	};
+
 	class basic_renderer_system_t : public system_if_t {
 	public:
 		struct std430_basic_material_t {
@@ -1971,9 +1975,9 @@ void main() {
 			std430_float specular_strength{};
 		};
 
-		static constexpr int max_instances = 500000;
-
-		basic_renderer_system_t(engine_ctx_t* ctx) : system_if_t(ctx) {
+		basic_renderer_system_t(engine_ctx_t* ctx, const basic_renderer_settings_t& settings)
+			: system_if_t(ctx)
+			, max_instances{settings.max_instances} {
 			instanced_program = get_ctx()->get_resource<shader_program_t>("basic_instanced_program");
 			sphere = get_ctx()->get_resource<vertex_array_t>("sphere");
 
@@ -2110,6 +2114,8 @@ void main() {
 		}
 
 	private:
+		int max_instances{};
+
 		resource_ptr_t<shader_program_t> instanced_program;
 		resource_ptr_t<vertex_array_t> sphere;
 
@@ -2182,6 +2188,7 @@ void main() {
 	struct particle_t {
 		glm::vec3 pos{};
 		glm::vec3 vel{};
+		int id{};
 	};
 
 	struct attractor_t {
@@ -2193,6 +2200,7 @@ void main() {
 		float eps{};
 		float dt_step{};
 		int max_particles{};
+		float grid_scale{};
 		float particle_r{};
 		float particle_repulse_coef{};
 		int heavy_cell_thresh{};
@@ -2200,13 +2208,15 @@ void main() {
 	};
 
 	// TODO : simd
+	// TODO : reordering bring havok and mess into the code
+	// TODO : rename to strange_particle_system
 	class physics_system_t : public system_if_t {
 	public:
 		friend class sparse_grid_ops_t;
 
 		struct sparse_grid_ops_t {
 			sparse_cell_t cell(int id) const {
-				return get_sparse_cell(ctx->particles[id].pos, ctx->grid_scale);
+				return get_sparse_cell(ctx->get_particle(id).pos, ctx->grid_scale);
 			}
 
 			std::uint32_t hash(int id) const {
@@ -2304,7 +2314,7 @@ void main() {
 			: system_if_t(ctx)
 			, eps{settings.eps}
 			, dt_step{settings.dt_step}
-			, grid_scale{1.0f / settings.particle_r}
+			, grid_scale{1.0f / settings.grid_scale}
 			, max_particles{settings.max_particles}
 			, particle_r{settings.particle_r}
 			, particle_repulse_coef{settings.particle_repulse_coef}
@@ -2314,8 +2324,7 @@ void main() {
 			, sparse_grid{settings.max_particles, sparse_grid_ops_t{this}}
 			, used_buckets{max_particles}
 			, heavy_buckets{max_particles}
-			, particles_reordered{std::make_unique<particle_t[]>(max_particles)}
-			, colors_reordered{std::make_unique<glm::vec3[]>(max_particles)}
+			, particles_reordered{max_particles}
 		{
 			auto* thread_pool = get_ctx()->get_system<thread_pool_system_t>("thread_pool");
 			for (int i = 0; i < thread_pool->worker_count(); i++) {
@@ -2324,33 +2333,7 @@ void main() {
 
 			auto* imgui = get_ctx()->get_system<imgui_system_t>("imgui");
 			imgui->register_callback([&] (){
-				ImGui::SetNextWindowSize(ImVec2{256, 256}, ImGuiCond_Once);
-				if (ImGui::Begin("physics")) {
-					ImGui::Text("particles: %d", (int)particles.size());
-					ImGui::Text("attractors: %d", (int)attractors.size());
-
-					ImGui::DragFloat("##repulse_coef", &particle_repulse_coef, 1.0f, 0.0f, 1000.0f, "repulse coef: %.1f");
-					ImGui::DragFloat("##dt_step", &dt_step, 0.0001f, 0.0f, 0.1f, "dt step: %.4f");
-
-					if (ImGui::DragFloat("##particle_r", &particle_r, 0.001f, 0.001f, 1.0f, "particle r: %.3f")) {
-						grid_scale = 1.0f / particle_r;
-					}
-
-					ImGui::DragInt("##updates_per_frame", &updates_per_frame, 1.0f, 0, 100, "updates per frame: %d");
-					ImGui::DragInt("##heavy_bucket_thresh", &heavy_cell_thresh, 1000.0f, 0, 1000000, "heavy cell thresh: %d");
-
-					if (ImGui::CollapsingHeader("attractors")) {
-						for (int i = 0; i < attractors.size(); i++) {
-							ImGui::PushID(i);
-							attractor_t& attractor = attractors[i];
-							ImGui::InputFloat3("pos", glm::value_ptr(attractor.pos));
-							ImGui::DragFloat("##GM", &attractor.GM, 10.0f, -1e5, +1e5);
-							ImGui::PopID();
-						}
-					}
-				}
-				ImGui::End();
-				return true;
+				return draw_ui();
 			});
 		}
 
@@ -2363,18 +2346,65 @@ void main() {
 				sparse_grid.reset_size(particles.size());
 				used_buckets.reset();
 				heavy_buckets.reset();
-				reordered_count.store(0, std::memory_order_relaxed);
+				particles_reordered.reset();
+				reordered = false;
 
 				dispatch_jobs(PrepareSparseGrid);
 				dispatch_jobs(BuildSparseGrid);
+
 				dispatch_jobs(ReorderData);
+				reordered = true;
+
 				dispatch_jobs(UpdateLightCells);
-				//dispatch_jobs(UpdateHeavyCells);
+				dispatch_jobs(UpdateHeavyCells);
 			}
 			dispatch_jobs(SubmitToRender);
 		}
 
 	private:
+		bool draw_ui() {
+			ImGui::SetNextWindowSize(ImVec2{256, 256}, ImGuiCond_Once);
+			if (ImGui::Begin("physics")) {
+				ImGui::Text("particles: %d", (int)particles.size());
+				ImGui::Text("attractors: %d", (int)attractors.size());
+
+				ImGui::PushItemWidth(-1.0f);
+				ImGui::DragFloat("##repulse_coef", &particle_repulse_coef, 1.0f, 0.0f, 1000.0f, "repulse coef: %.1f", ImGuiSliderFlags_AlwaysClamp);
+				ImGui::DragFloat("##dt_step", &dt_step, 0.0001f, 0.0f, 0.1f, "dt step: %.4f", ImGuiSliderFlags_AlwaysClamp);
+				ImGui::DragFloat("##grid_scale", &grid_scale, 0.005f, 0.05f, 10.0f, "grid scale: %.2f", ImGuiSliderFlags_AlwaysClamp);
+				ImGui::DragFloat("##particle_r", &particle_r, 0.005f, 0.05f, 10.0f, "particle r: %.3f", ImGuiSliderFlags_AlwaysClamp);
+				ImGui::DragInt("##updates_per_frame", &updates_per_frame, 1.0f, 0, 100, "updates per frame: %d", ImGuiSliderFlags_AlwaysClamp);
+				ImGui::DragInt("##heavy_bucket_thresh", &heavy_cell_thresh, 1000.0f, 0, 10000000, "heavy cell thresh: %d", ImGuiSliderFlags_AlwaysClamp);
+				ImGui::DragFloat("##catch_radius", &catch_radius, 0.01f, 0.5f, 20.0f, "catch radius: %.2f", ImGuiSliderFlags_AlwaysClamp);
+				ImGui::DragFloat("##bounding_r", &bounding_r, 1.0f, 1.0f, 10000.0f, "bounding r: %.3f", ImGuiSliderFlags_AlwaysClamp);
+				ImGui::PopItemWidth();
+
+				ImGui::Checkbox("sync grid scale & particle", &sync_grid_scale_n_particle_r);
+				if (sync_grid_scale_n_particle_r) {
+					grid_scale = 1.0 / particle_r;
+				}
+
+				if (ImGui::CollapsingHeader("attractors")) {
+					for (int i = 0; i < attractors.size(); i++) {
+						ImGui::PushID(i);
+
+						attractor_t& attractor = attractors[i];
+						ImGui::PushItemWidth(-1.0f);
+						ImGui::AlignTextToFramePadding();
+						ImGui::Text("pos");
+						ImGui::SameLine();
+						ImGui::InputFloat3("##pos", glm::value_ptr(attractor.pos));
+						ImGui::DragFloat("##GM", &attractor.GM, 10.0f, -1e5, +1e5, "GM: %.2f", ImGuiSliderFlags_AlwaysClamp);
+						ImGui::PopItemWidth();
+
+						ImGui::PopID();
+					}
+				}
+			}
+			ImGui::End();
+			return true;
+		}
+
 		void dispatch_jobs(update_phase_t phase) {
 			update_phase = phase;
 
@@ -2409,10 +2439,10 @@ void main() {
 					break;
 				}
 
-				/*case UpdateHeavyCells: {
+				case UpdateHeavyCells: {
 					update_heavy_cells(job);
 					break;
-				}*/
+				}
 
 				case SubmitToRender: {
 					submit_to_render(job);
@@ -2464,16 +2494,13 @@ void main() {
 				total_inserted += sparse_grid.get_bucket(used_buckets[i]).get_count();
 			}
 
-			int base_index = reordered_count.fetch_add(total_inserted, std::memory_order_relaxed);
+			int region_start = particles_reordered.push_ext(total_inserted);
 			for (int i = start; i < stop; i++) {
-				int new_head = base_index;
+				int new_head = region_start;
 				for (auto iter = sparse_grid.iter(used_buckets[i]); iter.valid(); iter.next()) {
-					particles_reordered[base_index] = particles[iter.get()];
-					colors_reordered[base_index] = colors[iter.get()];
-					base_index++;
+					particles_reordered[region_start++] = particles[iter.get()];
 				}
-				// set head to the start of the consequent range
-				sparse_grid.get_bucket(used_buckets[i]).head.store(new_head, std::memory_order_relaxed);
+				sparse_grid.redir(used_buckets[i], new_head); // set head to the start of the consequent range
 			}
 		}
 
@@ -2485,11 +2512,11 @@ void main() {
 			static_vector_t<int, batch_size> heavy_buckets_batch;
 			for (int i = start; i < stop; i++) {
 				lofi_bucket_t& bucket = sparse_grid.get_bucket(used_buckets[i]);
-		
+
 				sparse_neighbours_t neighbours = get_neighbours(used_buckets[i]);
-				//if (compute_cell_work_amount(neighbours) < heavy_cell_thresh) {
+				if (!heavy_cell(neighbours)) {
 					update_cell(neighbours, 0, bucket.get_count());
-				/*} else {
+				} else {
 					if (heavy_buckets_batch.can_push()) {
 						heavy_buckets_batch.push_back(neighbours.center);
 					} else {
@@ -2497,7 +2524,7 @@ void main() {
 						std::memcpy(insert_place, heavy_buckets_batch.data(), sizeof(int) * heavy_buckets_batch.size());
 						heavy_buckets_batch.reset();
 					}
-				}*/
+				}
 			}
 
 			if (!heavy_buckets_batch.empty()) {
@@ -2507,7 +2534,14 @@ void main() {
 			}
 		}
 
-		/*std::int64_t compute_cell_work_amount(const sparse_neighbours_t& neighbours) {
+		bool heavy_cell(const sparse_neighbours_t& neighbours) {
+			if (sparse_grid.get_bucket(neighbours.center).get_count() < update_jobs.size()) {
+				return false; // we cant split work for this cell
+			}
+			return compute_cell_work_amount(neighbours) >= heavy_cell_thresh;
+		}
+
+		std::int64_t compute_cell_work_amount(const sparse_neighbours_t& neighbours) {
 			std::int64_t center_count = sparse_grid.get_bucket(neighbours.center).get_count();
 			std::int64_t total_work = center_count * (center_count + 1);
 			for (int neighbour : neighbours.neighbours) {
@@ -2517,9 +2551,9 @@ void main() {
 				total_work += sparse_grid.get_bucket(neighbour).get_count() * center_count;
 			}
 			return total_work;
-		}*/
+		}
 
-		/*void update_heavy_cells(update_job_t* job) {
+		void update_heavy_cells(update_job_t* job) {
 			int count = heavy_buckets.get_size();
 			for (int i = 0; i < count; i++) {
 				lofi_bucket_t& bucket = sparse_grid.get_bucket(heavy_buckets[i]);
@@ -2532,7 +2566,7 @@ void main() {
 				sparse_neighbours_t neighbours = get_neighbours(heavy_buckets[i]);
 				update_cell(neighbours, start, stop);
 			}
-		}*/
+		}
 
 		void submit_to_render(update_job_t* job) {
 			auto [start, stop] = compute_job_range(particles.size(), update_jobs.size(), job->job_id);
@@ -2544,12 +2578,14 @@ void main() {
 			auto region = renderer->submit_next_frame(stop - start);
 
 			for (int i = 0; i < region.count; i++) {
+				particle_t& particle = particles[start + i];
+
 				glm::mat4 mat{particle_r};
-				mat[3] = glm::vec4(particles[start + i].pos, 1.0f); // TODO : very ugly
+				mat[3] = glm::vec4(particle.pos, 1.0f); // TODO : very ugly
 				region.mat[i] = mat;
 
 				auto& mtl = region.mtl[i];
-				mtl.color = colors[start + i];
+				mtl.color = glm::vec3(1.0f, 0.5f, 0.25f); //colors[particle.id];
 				mtl.shininess = 64.0f;
 				mtl.specular_strength = 1.0f;
 			}
@@ -2559,7 +2595,7 @@ void main() {
 			lofi_bucket_t& bucket = sparse_grid.get_bucket(bucket_index);
 			int head = bucket.get_head();
 
-			sparse_cell_t center = get_sparse_cell(particles[head].pos, grid_scale);
+			sparse_cell_t center = get_sparse_cell(particles_reordered[head].pos, grid_scale);
 
 			sparse_neighbours_t neighbours{bucket_index};
 			for (int i = 0; i < sparse_neighbours_t::offset_count; i++) {
@@ -2571,22 +2607,18 @@ void main() {
 		struct cell_data_t {
 			particle_t* particles_updated{};
 			particle_t* particles_reordered{};
-			glm::vec3* colors{};
-			glm::vec3* colors_reordered{};
 			int count{};
 		};
+
+		particle_t& get_particle(int id) {
+			return !reordered ? particles[id] : particles_reordered[id];
+		}
 
 		cell_data_t get_cell_data(int cell) {
 			lofi_bucket_t& bucket = sparse_grid.get_bucket(cell);
 			int offset = bucket.get_head();
 			int count = bucket.get_count();
-			return {
-				particles.data() + offset,
-				particles_reordered.get() + offset,
-				colors.data() + offset,
-				colors_reordered.get() + offset,
-				count
-			};
+			return {particles.data() + offset, particles_reordered.get_data(offset), count};
 		}
 
 		void update_cell(const sparse_neighbours_t& neighbours, int start, int stop) {
@@ -2617,7 +2649,7 @@ void main() {
 
 				particle_t& updated_particle = center_cell_data.particles_updated[i];
 				std::tie(updated_particle.pos, updated_particle.vel) = integrate_motion(curr_particle.pos, curr_particle.vel, acc);
-				center_cell_data.colors[i] = center_cell_data.colors_reordered[i];
+				updated_particle.id = curr_particle.id;
 			}
 		}
 
@@ -2643,8 +2675,8 @@ void main() {
 			for (auto& attractor : attractors) {
 				glm::vec3 dr = pos - attractor.pos;
 				float r = glm::length(dr);
-				if (r < 5.0f) {
-					return -vel * std::sqrt(5.0f / r - 1.0f);
+				if (r < catch_radius) {
+					return -vel * std::sqrt(std::max(r / catch_radius - 1.0f, 0.0f));
 				}
 				float ri = 1.0f / r;
 				acc -= (attractor.GM * ri * ri) * (dr * ri);
@@ -2657,15 +2689,21 @@ void main() {
 		std::tuple<glm::vec3, glm::vec3> integrate_motion(const glm::vec3 r0, const glm::vec3& v0, const glm::vec3& a) {
 			glm::vec3 v1 = v0 + dt_step * a;
 			glm::vec3 r1 = r0 + dt_step * v1;
-			if (float r = glm::length(r1); r > 200.0f) {
-				v1 = r1 * (-1.0f / r);
+			if (float rr = glm::dot(r1, r1); rr > bounding_r * bounding_r) {
+				r1 *= (bounding_r / std::sqrt(rr));
+
+				glm::vec3 nr1 = r1 * (1.0f / bounding_r);
+				float proj_v1r1 = glm::dot(v1, nr1);
+				if (proj_v1r1 > eps) {
+					v1 -= nr1 * (2.0f * proj_v1r1);
+				}
 			}
 			return {r1, v1};
 		}
 
 	public:
 		void add_particle(const glm::vec3& pos, const glm::vec3& vel, const glm::vec3& color) {
-			particles.push_back({pos, vel});
+			particles.push_back({pos, vel, (int)particles.size()});
 			colors.push_back(color);
 		}
 
@@ -2682,6 +2720,11 @@ void main() {
 		float particle_repulse_coef{};
 		int heavy_cell_thresh{};
 		int updates_per_frame{};
+		
+		bool sync_grid_scale_n_particle_r{};
+
+		float catch_radius{5.0f};
+		float bounding_r{100.0f};
 
 		std::vector<attractor_t> attractors{};
 		std::vector<particle_t> particles{};
@@ -2690,9 +2733,8 @@ void main() {
 		sparse_grid_t sparse_grid; 
 		lofi_stack_t<int> used_buckets;
 		lofi_stack_t<int> heavy_buckets;
-		std::unique_ptr<particle_t[]> particles_reordered;
-		std::unique_ptr<glm::vec3[]> colors_reordered;
-		std::atomic<int> reordered_count{};
+		lofi_stack_t<particle_t> particles_reordered;
+		bool reordered{};
 
 		std::vector<std::unique_ptr<update_job_t>> update_jobs;
 		update_phase_t update_phase{};
@@ -2735,8 +2777,8 @@ void main() {
 			ctx->add_resource<framebuffer_t>("frame", framebuffer);
 
 			omnidir_light_t light = {
-				.ambient = glm::vec3(0.2f),
-				.color = glm::vec3(15.0f),
+				.ambient = glm::vec3(0.3f),
+				.color = glm::vec3(10.0f),
 				.pos = glm::vec3(0.0f),
 			};
 
@@ -2805,6 +2847,7 @@ void main() {
 				if (ImGui::Button("spawn balls")) {
 					spawn_balls(balls_count_gui);
 				}
+				ImGui::Checkbox("enable flying", &flying);
 			}
 			ImGui::End();
 			return true;
@@ -2843,6 +2886,10 @@ void main() {
 		}
 
 		void update() {
+			if (!flying) {
+				return;
+			}
+
 			float t = glfw::get_time() * 0.1f;
 
 			entity_t basic_pass{get_ctx(), basic_pass_handle};
@@ -2857,6 +2904,7 @@ void main() {
 		handle_t imgui_pass_handle{};
 		int balls_count{};
 		int balls_count_gui{};
+		bool flying{};
 
 		resource_ptr_t<texture_t> framebuffer_texture{};
 	};
@@ -2875,6 +2923,7 @@ void main() {
 			constexpr int window_height = 800;
 			constexpr int tex_width = 1280;
 			constexpr int tex_height = 720;
+			constexpr int max_balls = 1 << 18;
 
 			thread_pool = std::make_shared<thread_pool_system_t>(ctx, 24);
 			ctx->add_system("thread_pool", thread_pool);
@@ -2888,13 +2937,18 @@ void main() {
 			basic_resources_system = std::make_shared<basic_resources_system_t>(ctx, tex_width, tex_height);
 			ctx->add_system("basic_resources", basic_resources_system);
 
-			basic_renderer_system = std::make_shared<basic_renderer_system_t>(ctx);
+			basic_renderer_settings_t basic_renderer_settings{
+				.max_instances = max_balls
+			};
+
+			basic_renderer_system = std::make_shared<basic_renderer_system_t>(ctx, basic_renderer_settings);
 			ctx->add_system("basic_renderer", basic_renderer_system);
 
 			physics_system_settings_t physics_settings{
 				.eps = 1e-6f,
 				.dt_step = 1e-3f,
-				.max_particles = 1 << 19,
+				.max_particles = max_balls,
+				.grid_scale = 1.0f,
 				.particle_r = 2.0f,
 				.particle_repulse_coef = 10.0f,
 				.heavy_cell_thresh = 10000,
@@ -2908,7 +2962,7 @@ void main() {
 			ctx->add_system("timer", timer_system);
 
 			level_system_settings_t level_settings{
-				.balls_count = 1000,
+				.balls_count = 1,
 			};
 
 			level_system = std::make_shared<level_system_t>(ctx, level_settings);

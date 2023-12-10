@@ -45,6 +45,11 @@ struct lofi_item_iter_t {
 	int curr{};
 };
 
+struct lofi_item_iter_flat_t {
+	int start{};
+	int count{};
+};
+
 // ops must have the following ops:
 // - std::uint32_t hash(int)
 // - std::uint32_t hash(const item_t&)
@@ -122,6 +127,10 @@ struct lofi_hashtable1_t {
 		return buckets[index];
 	}
 
+	void redir(int bucket, int new_head) {
+		buckets[bucket].head.store(new_head, std::memory_order_relaxed);
+	}
+
 	template<class item_or_handle_t>
 	int get(const item_or_handle_t& item) const {
 		int bucket_index = hash_to_index(ops.hash(item));
@@ -157,6 +166,9 @@ struct lofi_hashtable1_t {
 		return lofi_item_iter_t{list_entries.get(), buckets[bucket_index].head.load(std::memory_order_relaxed)};
 	}
 
+	/*lofi_item_iter_flat_t iter_flat(int bucket_index) const {
+
+	}*/
 
 	int capacity_m1{};
 	int capacity_log2{};
@@ -284,6 +296,10 @@ struct lofi_hashtable2_t {
 		return buckets[index];
 	}
 
+	void redir(int bucket, int new_head) {
+		buckets[bucket].head.store(new_head, std::memory_order_relaxed);
+	}
+
 	template<class item_or_handle_t>
 	int _get(const lofi_bucket_t* buckets_split, int split_size_m1, int base_index, const item_or_handle_t& item, int max_scans) const {
 		int bucket_index = base_index;
@@ -363,9 +379,11 @@ struct lofi_stack_t {
 
 	// worker
 	data_t* push(int count) {
-		int start = size.fetch_add(count, std::memory_order_relaxed);
-		assert(start + count <= max_size);
-		return data.get() + start;
+		return data.get() + push_ext(count);
+	}
+
+	int push_ext(int count) {
+		return size.fetch_add(count, std::memory_order_relaxed);
 	}
 
 	// worker
