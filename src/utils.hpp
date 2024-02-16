@@ -237,15 +237,20 @@ public:
 
 
 template<class type_t>
-void shuffle_vec(std::vector<type_t>& vec, seed_t seed = 0) {
-	if (vec.empty()) {
+void shuffle_vec(type_t* data, int size, seed_t seed = 0) {
+	if (size <= 0) {
 		return;
 	}
 
 	basic_int_gen_t gen(seed);
-	for (int i = vec.size() - 1; i > 0; i--) {
-		std::swap(vec[i], vec[gen.gen() % i]);
+	for (int i = size - 1; i > 0; i--) {
+		std::swap(data[i], data[gen.gen() % i]);
 	}
+}
+
+template<class type_t>
+void shuffle_vec(std::vector<type_t>& vec, seed_t seed = 0) {
+	shuffle_vec(vec.data(), vec.size(), seed);
 }
 
 

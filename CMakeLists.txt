@@ -1,7 +1,12 @@
 cmake_minimum_required(VERSION 3.20)
 
+# options
+option(YIN_YANG_USE_SIMD "Enable usage of SIMD")
+message(STATUS "YIN_YANG_USE_SIMD=${YIN_YANG_USE_SIMD}")
+
 # toolchain setup
 set(USE_VCPKG TRUE CACHE BOOL "whether you want to use vcpkg or not")
+message(STATUS "USE_VCPKG=${USE_VCPKG}")
 
 if(USE_VCPKG)
 	set(CMAKE_TOOLCHAIN_FILE ${VCPKG_TOOLCHAIN_FILE} CACHE FILEPATH "path to vcpkg toolchain file")
@@ -9,26 +14,38 @@ if(USE_VCPKG)
 	# variable from vcpkg.cmake toolchain file
 	# this directory will contain all installed <Package>Config.cmake files
 	# this is required for find_package()
-	set(VCPKG_ALL_INSTALLED_DIR ${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET})
-	message(STATUS ${VCPKG_ALL_INSTALLED_DIR})
-	set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${VCPKG_ALL_INSTALLED_DIR})
-	message(STATUS ${CMAKE_MODULE_PATH})
+	#set(VCPKG_ALL_INSTALLED_DIR ${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET})
+	#message(STATUS ${VCPKG_ALL_INSTALLED_DIR})
+	#set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${VCPKG_ALL_INSTALLED_DIR})
+	#message(STATUS ${CMAKE_MODULE_PATH})
 
 	# vcpkg dependencies
-	set(CMAKE_PREFIX_PATH ${CMAKE_PREFIX_PATH} ${VCPKG_ALL_INSTALLED_DIR})
-	message(STATUS ${CMAKE_PREFIX_PATH})
+	#set(CMAKE_PREFIX_PATH ${CMAKE_PREFIX_PATH} ${VCPKG_ALL_INSTALLED_DIR})
+	#message(STATUS ${CMAKE_PREFIX_PATH})
 endif()
 
-
-project(yin_yang)
-
-# setup arch string
+# setups
 if(WIN32)
 	set(platform "windows")
 elseif(UNIX)
 	set(platform "unix")
 else()
     message(FATAL_ERROR "unknown platform")
+endif()
+
+
+project(yin_yang)
+
+add_library(yin_yang_interface INTERFACE)
+if(YIN_YANG_USE_SIMD)
+	target_compile_definitions(yin_yang_interface INTERFACE YIN_YANG_USE_SIMD)
+	if(MSVC)
+		target_compile_options(yin_yang_interface INTERFACE "/arch:SSE" "/arch:SSE2" "/arch:AVX" "/arch:AVX2") # simplified
+	endif()
+endif()
+if (MSVC)
+	# __VA_OPT__ fix for MSVC
+	target_compile_options(yin_yang_interface INTERFACE "/Zc:preprocessor")
 endif()
 
 # dependencies
@@ -74,13 +91,6 @@ function(populate_filters)
 		source_group(TREE "${src_dir}" FILES ${files})
 	endif()
 endfunction()
-
-
-# __VA_OPT__ fix for MSVC
-if (MSVC)
-	message(STATUS "MSVC compiler detected")
-	add_compile_options("/Zc:preprocessor")
-endif()
 
 # cpp standart
 set(CMAKE_CXX_STANDARD 20)

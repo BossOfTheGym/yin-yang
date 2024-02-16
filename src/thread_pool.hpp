@@ -107,7 +107,7 @@ struct thread_pool_t {
 		}
 
 		std::unique_lock lock_guard{lock};
-		worker_terminated.wait(lock_guard, [&] (){
+		worker_terminated.wait(lock_guard, [&] () {
 			return workers_terminated == workers.size();
 		});
 		lock_guard.unlock();
@@ -119,12 +119,12 @@ struct thread_pool_t {
 
 	void thread_pool_worker_func() {
 		while (true) {
-			job_if_t* job = job_queue.pop();
-			if (!job) {
+			if (job_if_t* job = job_queue.pop()) {
+				job->execute();
+				job->set_ready();
+			} else {
 				break;
 			}
-			job->execute();
-			job->set_ready();
 		}
 
 		std::unique_lock lock_guard{lock};

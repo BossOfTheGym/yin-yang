@@ -2,409 +2,400 @@
 
 #include "utils.hpp"
 
-using lofi_hasher_t = callback_t<std::uint32_t(int)>;
-using lofi_equals_t = callback_t<bool(int, int)>;
+// ops must have the following ops:
+// - uint32_t hash(uint32_t)
+// - uint32_t hash(const item_t&)
+// - bool equals(uint32_t, uint32_t)
+// - bool equals(uint32_t, const item_t&)
+
+// hashtable can store 2^20 entries at max
+inline constexpr int lofi_max_buckets = 1 << 20;
+
+// unsafe bitfield implementation (yes we are doing compilers job here)
+// head - head of the list of items inserted in the current bucket
+struct lofi_bucket_data_t {
+	lofi_bucket_data_t() = default;
+
+	lofi_bucket_data_t(uint32_t _data) : data{_data} {}
+
+	lofi_bucket_data_t(uint32_t _hash, uint32_t _head) {
+		pack(_hash, _head);
+	}
+
+	void pack(uint32_t _hash, uint32_t _head) {
+		data = 0x00100000;
+		data |= _head;
+		data |= _hash & 0xFFE00000;
+	}
+
+	bool used() const {
+		return data & 0x00100000;
+	}
+
+	uint32_t head() const {
+		return data & 0xFFFFF;
+	}
+	
+	bool hash_equals(uint32_t h) const {
+		return (data & 0xFFE00000) == (h & 0xFFE00000);
+	}
+
+	uint32_t data{}; // (msb) hash(11) | used(1)| head(20) (lsb)
+};
 
 struct lofi_bucket_t {
-	void reset() {
-		head.store(-1, std::memory_order_relaxed);
-		count.store(0, std::memory_order_relaxed);
-	}
+	bool used() const { return data.used(); }
+	uint32_t head() const { return data.head(); }
 
-	int get_head() const {
-		return head.load(std::memory_order_relaxed);
-	}
-
-	int get_count() const {
-		return count.load(std::memory_order_relaxed);
-	}
-
-	std::atomic<int> head{}; // default : -1
-	std::atomic<int> count{}; // default : 0
+	lofi_bucket_data_t data{}; // atomic, managed via std::atomic_ref in hashtable
+	uint32_t count{}; // atomic, managed via std::atomic_ref in hashtable
 };
 
-struct lofi_list_entry_t {
-	int next{};
-};
+static_assert(sizeof(lofi_bucket_t) == sizeof(uint64_t), "sizeof lofi_bucket_t must be equal to uint64_t");
 
-struct lofi_item_iter_t {
-	int get() {
-		return curr;
+// TODO : remove next
+// true scans value is scans + 1 (after have been extracted from bit field)
+// bucket - index of the used bucket
+// next - next item to the inserted item (used externally)
+// scans - count of acans made to insert an item, true scans value is scans + 1 (after have been extracted from bit field)
+struct lofi_insertion_t {
+	enum {
+		new_bucket_flag = 0x1,
+		inserted_flag = 0x2,
+	};
+
+	lofi_insertion_t() = default;
+
+	lofi_insertion_t(uint64_t _data) : data{_data} {}
+
+	lofi_insertion_t(uint64_t _bucket, uint64_t _next, uint64_t _scans, uint64_t _flags) {
+		pack(_bucket, _next, _scans, _flags);
 	}
 
-	void next() {
-		int next = list_entries[curr].next;
-		curr = curr != next ? next : -1;
+	void pack(uint64_t _bucket, uint64_t _next, uint64_t _scans, uint64_t _flags) {
+		data = 0;
+		data |= _bucket;
+		data |= _next << 21;
+		data |= _scans << 41;
+		data |= _flags << 62;
+	}
+
+	uint64_t bucket() const {
+		return data & 0x1FFFFF;
+	}
+
+	uint64_t next() const {
+		return (data >> 21) & 0xFFFFF;
+	} 
+
+	uint64_t scans() const {
+		return (data >> 41) & 0x1FFFFF;
+	}
+
+	bool new_bucket() const {
+		return data & ((uint64_t)1 << 62);
+	}
+
+	bool inserted() const {
+		return data & ((uint64_t)1 << 63);
+	}
+
+	// (msb) flags(inserted(1) | new_bucket(1)) | scans(21) | next(20) | bucket(21) (lsb)
+	uint64_t data{}; 
+};
+
+inline constexpr lofi_insertion_t lofi_failed_insertion{};
+
+// TODO : remove lofi_get_result_t
+// scans - count of scans made to search for an element
+// true scans value is scans + 1 (after have been extracted from bit field)
+struct lofi_get_result_t {
+	lofi_get_result_t() = default;
+
+	lofi_get_result_t(uint64_t _data) : data{_data} {}
+
+	lofi_get_result_t(uint64_t _bucket, uint64_t _head, uint64_t _scans, bool _found) {
+		pack(_bucket, _head, _scans, _found);
+	}
+
+	void pack(uint64_t _bucket, uint64_t _head, uint64_t _scans, bool _found) {
+		data = 0;
+		data |= _bucket;
+		data |= _head << 21;
+		data |= _scans << 41;
+		data |= (uint64_t)_found << 62;
+	}
+
+	uint64_t bucket() const {
+		return data & 0x1FFFFF;
+	}
+
+	uint64_t head() const {
+		return (data >> 21) & 0xFFFFF;
+	}
+
+	uint64_t scans() const {
+		return (data >> 41) & 0x1FFFFF;
+	}
+
+	bool found() const {
+		return data & ((uint64_t)1 << 62);
+	}
+
+	uint64_t data{}; // (msb) unused(1) | found(1) | scans(21) | head(20) | bucket(21) (lsb)
+};
+
+inline constexpr lofi_get_result_t lofi_failed_get{};
+
+struct lofi_search_result_t {
+	uint32_t head() const {
+		return bucket.head();
+	}
+
+	uint32_t count() const {
+		return bucket.count;
 	}
 
 	bool valid() const {
-		return curr != -1;
+		return bucket.used();
 	}
 
-	const lofi_list_entry_t* list_entries{};
-	int curr{};
+	lofi_bucket_t bucket{};
+	uint32_t bucket_index{};
+	uint32_t scans{};
 };
 
-struct lofi_item_iter_flat_t {
-	int start{};
-	int count{};
+// list stored in memory as array of 'pointers' list[curr_item] = next_item_after_curr_item
+struct lofi_flat_list_walker_t {
+	uint32_t get() const {
+		assert(head < flat_size);
+		return head;
+	}
+
+	bool valid() const {
+		return !end_reached;
+	}
+
+	void next() {
+		assert(head < flat_size);
+		uint32_t old_head = head; 
+		head = flat_list[head];
+		end_reached = old_head == head;
+	}
+
+	void skip(int count) {
+		for (int i = 0; i < count; i++) {
+			next();
+		}
+	}
+
+	const uint32_t* flat_list{};
+	uint32_t flat_size{};
+	uint32_t head{};
+	bool end_reached{};
 };
 
-// ops must have the following ops:
-// - std::uint32_t hash(int)
-// - std::uint32_t hash(const item_t&)
-// - bool equals(int, int)
-// - bool equals(int, const item_t&)
+template<class func_t>
+void lofi_walk_flat_list(const uint32_t* flat_list, uint32_t flat_size, uint32_t head, func_t&& func) {
+	for (lofi_flat_list_walker_t walker{flat_list, flat_size, head}; walker.valid(); walker.next()) {
+		func(walker.get());
+	}
+}
 
-template<class ops_t>
-struct lofi_hashtable1_t {
-	static constexpr int inflation_coef = 2;
+inline int lofi_flat_list_size(const uint32_t* flat_list, uint32_t flat_size, uint32_t head) {
+	int count = 0;
+	lofi_walk_flat_list(flat_list, flat_size, head, [&](uint32_t) { count++; });
+	return count;
+}
 
-	static_assert(std::has_single_bit<unsigned>(inflation_coef), "must be power of 2");
-
-	lofi_hashtable1_t(const lofi_hashtable1_t&) = delete;
-	lofi_hashtable1_t& operator= (const lofi_hashtable1_t&) = delete;
-	lofi_hashtable1_t(lofi_hashtable1_t&&) noexcept = delete;
-	lofi_hashtable1_t& operator= (lofi_hashtable1_t&&) noexcept = delete;
-
-	lofi_hashtable1_t(int _max_size, ops_t _ops)
-		: ops{std::move(_ops)}
-		, max_capacity{nextpow2(_max_size) * inflation_coef}
-	{
-		buckets = std::make_unique<lofi_bucket_t[]>(max_capacity);
-		list_entries = std::make_unique<lofi_list_entry_t[]>(max_capacity / inflation_coef);
+// very low-level hashtable interface, all memory management burden is external to this tiny utility
+struct lofi_hashtable_t {
+	lofi_hashtable_t() = default;
+	lofi_hashtable_t(lofi_bucket_t* _buckets, uint32_t _bucket_count, uint32_t* _next_item, uint32_t _item_count) {
+		reset(_buckets, _bucket_count, _next_item, _item_count);
 	}
 
 	// master
-	void reset_size(int bucket_count_hint) {
-		object_count = std::min(max_capacity / inflation_coef, bucket_count_hint);
-		capacity_m1 = std::min(max_capacity, nextpow2(object_count) * inflation_coef) - 1;
-		capacity_log2 = std::countr_zero<unsigned>(capacity_m1 + 1);
+	void reset(lofi_bucket_t* _buckets, uint32_t _bucket_count, uint32_t* _next_item, uint32_t _item_count) {
+		assert(std::has_single_bit(_bucket_count));	
+		assert(_item_count <= _bucket_count);
+		buckets = _buckets;
+		capacity_m1 = _bucket_count - 1;
+		capacity_log2 = std::countr_zero(_bucket_count);
+		next_item = _next_item;
+		item_count = _item_count;
 	}
 
-	// worker
-	// used by worker to reset the range of buckets
-	lofi_bucket_t* get_buckets_data(int start = 0) {
-		return buckets.get() + start;
-	}
+	// mt function
+	// returned value 'next' is used to build list of values that belong to the same bucket
+	// this list (lists) can be walked be lofi_list_walker_t utility
+	// last element is an element that has next pointing to itself
+	template<class hash_ops_t>
+	[[nodiscard]] lofi_insertion_t put(uint32_t item, const hash_ops_t& ops) {
+		assert(item < item_count);
 
-	// worker
-	// returns either index of a bucket that was just used or -1 if it was already used
-	struct put_result_t {
-		int bucket_index{};
-		int scans{}; // well'p mostly used for testing, on practical usage
-	};
+		uint32_t hash = ops.hash(item);
+		uint32_t bucket_index = hash_to_index(hash);
+		for (uint32_t i = 0; i <= capacity_m1; i++) {
+			lofi_bucket_t& bucket = buckets[bucket_index];
 
-	put_result_t put(int item) {
-		int bucket_index = hash_to_index(ops.hash(item));
-		for (int i = 0; i <= capacity_m1; i++) {
-			auto& bucket = buckets[bucket_index];
+			lofi_bucket_data_t old_data = std::atomic_ref(bucket.data).load(std::memory_order_relaxed);
+			lofi_bucket_data_t new_data{hash, item};
 
-			int head_old = bucket.head.load(std::memory_order_relaxed);
-			if (head_old == -1 && bucket.head.compare_exchange_strong(head_old, item, std::memory_order_relaxed)) {
-				bucket.count.fetch_add(1, std::memory_order_relaxed);
-				list_entries[item].next = item;
-				return {bucket_index, i + 1};
-			}
-			if (ops.equals(head_old, item)) { // totaly legit to use possibly invalid head here
-				bucket.count.fetch_add(1, std::memory_order_relaxed);
-				list_entries[item].next = bucket.head.exchange(item, std::memory_order_relaxed); // head can be invalid
-				return {-1, i + 1};
+			if (!old_data.used() && std::atomic_ref(bucket.data).compare_exchange_strong(old_data, new_data, std::memory_order_relaxed)) {
+				next_item[item] = item;
+				std::atomic_ref(bucket.count).fetch_add(1, std::memory_order_relaxed);
+				return lofi_insertion_t{bucket_index, 0, i, lofi_insertion_t::new_bucket_flag | lofi_insertion_t::inserted_flag};
 			}
 
-			bucket_index = (bucket_index + 1) & capacity_m1;
-		}
-		return {-1, -1};
-	}
-
-
-	// worker & master
-	lofi_bucket_t& get_bucket(int index) {
-		return buckets[index];
-	}
-
-	const lofi_bucket_t& get_bucket(int index) const {
-		return buckets[index];
-	}
-
-	void redir(int bucket, int new_head) {
-		buckets[bucket].head.store(new_head, std::memory_order_relaxed);
-	}
-
-	template<class item_or_handle_t>
-	int get(const item_or_handle_t& item) const {
-		int bucket_index = hash_to_index(ops.hash(item));
-		for (int i = 0; i <= capacity_m1; i++) {
-			auto& bucket = buckets[bucket_index];
-
-			int head = bucket.head.load(std::memory_order_relaxed);
-			if (head == -1) {
-				return -1;
-			}
-			if (ops.equals(head, item)) {
-				return bucket_index;
+			if (old_data.hash_equals(hash) && ops.equals(old_data.head(), item)) {
+				old_data = std::atomic_ref(bucket.data).exchange(new_data, std::memory_order_relaxed);
+				next_item[item] = old_data.head();
+				std::atomic_ref(bucket.count).fetch_add(1, std::memory_order_relaxed);
+				return lofi_insertion_t{bucket_index, 0, i, lofi_insertion_t::inserted_flag};
 			}
 
 			bucket_index = (bucket_index + 1) & capacity_m1;
 		}
-		return -1;
+		return lofi_failed_insertion;
 	}
 
-	int hash_to_index(std::uint32_t hash) const {
+	// mt function, item_t can either be item itself or its integer handle
+	template<class item_t, class hash_ops_t>
+	[[nodiscard]] lofi_search_result_t get(const item_t& item, const hash_ops_t& ops) const {
+		uint32_t hash = ops.hash(item);
+		uint32_t bucket_index = hash_to_index(hash);
+		for (uint32_t i = 0; i <= capacity_m1; i++) {
+			lofi_bucket_t bucket = buckets[bucket_index]; // we can copy here
+
+			if (bucket.data.used()) {
+				uint32_t head = bucket.data.head();
+				if (bucket.data.hash_equals(hash) && ops.equals(head, item)) {
+					return lofi_search_result_t{bucket, bucket_index, i};
+				}
+			} else {
+				return lofi_search_result_t{};
+			}
+
+			bucket_index = (bucket_index + 1) & capacity_m1;
+		}
+		return lofi_search_result_t{};
+	}
+
+	lofi_bucket_t get_bucket(uint32_t index) const {
+		return buckets[index];
+	}
+
+	uint32_t hash_to_index(uint32_t hash) const {
 		return ((hash >> capacity_log2) + hash) & capacity_m1; // add upper bits to lower
 	}
 
-	int get_buckets_count() const {
+	uint32_t hash_to_index2(uint32_t hash) const {
+		return hash_to_index((hash >> capacity_log2) + (hash & capacity_m1)); // extra addition
+	}
+
+	uint32_t get_capacity() const {
 		return capacity_m1 + 1;
 	}
 
-	int get_object_count() const {
-		return object_count;
+	lofi_flat_list_walker_t iter(uint32_t head) const {
+		assert(head < item_count);
+		return lofi_flat_list_walker_t{next_item, item_count, head};
 	}
 
-	lofi_item_iter_t iter(int bucket_index) const {
-		return lofi_item_iter_t{list_entries.get(), buckets[bucket_index].head.load(std::memory_order_relaxed)};
-	}
-
-	/*lofi_item_iter_flat_t iter_flat(int bucket_index) const {
-
-	}*/
-
-	int capacity_m1{};
-	int capacity_log2{};
-
-	ops_t ops;
-
-	std::unique_ptr<lofi_bucket_t[]> buckets; // resized to capacity (increased capacity to decrease contention)
-	std::unique_ptr<lofi_list_entry_t[]> list_entries; // size = object_count
-
-	const int max_capacity;
-	int object_count{};
+	lofi_bucket_t* buckets{};
+	uint32_t capacity_m1{}; // TODO : rename to bucket_capacity_m1
+	uint32_t capacity_log2{}; // TODO : rename to capacity_log2
+	uint32_t* next_item{};
+	uint32_t item_count{};
 };
 
-template<class ops_t>
-struct lofi_hashtable2_t {
-	static constexpr int inflation_coef = 2; // power of 2
-	static constexpr int capacity_split_coef_log2 = 2;
-	static constexpr int capacity_split_coef = 1 << capacity_split_coef_log2; // power of 2
-	static constexpr int max_scans_per_split = 3;
-
-	static_assert(std::has_single_bit<unsigned>(inflation_coef), "must be power of 2");
-	static_assert(std::has_single_bit<unsigned>(capacity_split_coef), "must be power of 2");
-
-	static int hash_to_index(std::uint32_t hash, std::uint32_t size_log2, std::uint32_t size_m1) {
-		return ((hash >> size_log2) + hash) & size_m1; // add upper bits to lower
+template<class type_t>
+struct lofi_view_t {
+	type_t& operator[] (int index) const {
+		assert(index >= 0 && index < _size);
+		return _data[index];
 	}
 
-	static std::uint32_t hash_repeat(std::uint32_t hash) {
-		return (hash * 0x85ebca6b + (hash >> 17));
+	type_t* data() const {
+		return _data;
 	}
 
-	lofi_hashtable2_t(const lofi_hashtable2_t&) = delete;
-	lofi_hashtable2_t& operator= (const lofi_hashtable2_t&) = delete;
-	lofi_hashtable2_t(lofi_hashtable2_t&&) noexcept = delete;
-	lofi_hashtable2_t& operator= (lofi_hashtable2_t&&) noexcept = delete;
+	int size() const {
+		return _size;
+	}
 
-	lofi_hashtable2_t(int _max_size, ops_t _ops)
-		: ops{std::move(_ops)}
-		, max_capacity{std::max(nextpow2(_max_size), capacity_split_coef) * inflation_coef} // so it is not that small and divisible by capacity_split_coef
-	{
-		buckets = std::make_unique<lofi_bucket_t[]>(max_capacity);
-		list_entries = std::make_unique<lofi_list_entry_t[]>(max_capacity / inflation_coef);
+	int byte_size() const {
+		return _size * sizeof(type_t);
+	}
+
+	bool valid() const {
+		return _size != 0;
+	}
+
+	auto bite(int amount) {
+		assert(amount <= _size);
+		lofi_view_t part{_data, amount};
+		_data += amount;
+		_size -= amount;
+		return part;
+	}
+
+	type_t* _data{};
+	int _size{};
+};
+
+template<class type_t>
+auto lofi_create_view(type_t* data, int start, int size) {
+	return lofi_view_t{data + start, size};
+}
+
+template<class type_t>
+struct lofi_stack_alloc_t {
+	lofi_stack_alloc_t() = default;
+	lofi_stack_alloc_t(type_t* _data, int _capacity) {
+		reset(_data, _capacity);
 	}
 
 	// master
-	void reset_size(int bucket_count_hint) {
-		// split_capacity_m1 + 1 == 1 << split_capacity_log2
-		split_capacity_m1 = std::min(max_capacity, nextpow2(bucket_count_hint) * inflation_coef) / capacity_split_coef - 1;
-		split_capacity_log2 = std::countr_zero<unsigned>(split_capacity_m1 + 1);
+	void reset(type_t* _data, int _capacity) {
+		data = _data;
+		capacity = _capacity;
+		top = 0;
 	}
 
 	// worker
-	// used by worker to reset the range of buckets
-	lofi_bucket_t* get_buckets_data(int start = 0) {
-		return buckets.get() + start;
+	[[nodiscard]] auto allocate(int count) {
+		int old_top = std::atomic_ref(top).fetch_add(count, std::memory_order_relaxed);
+		if (valid_range(old_top, count)) { // can overflow
+			return view(old_top, count);
+		}
+		return lofi_view_t<type_t>{};
 	}
 
 	// worker
-	// returns either index of a bucket that was just used or -1 if it was already used
-	struct put_result_t {
-		int bucket_index{};
-		int scans{}; // well'p mostly used for testing, on practical usage
-	};
-
-	put_result_t _put(lofi_bucket_t* buckets_split, int split_size_m1, int base_index, int item, int max_scans) {
-		int bucket_index = base_index;
-		for (int i = 0; i < max_scans; i++) {
-			auto& bucket = buckets_split[bucket_index];
-
-			int old_head = bucket.head.load(std::memory_order_relaxed);
-			if (old_head == -1 && bucket.head.compare_exchange_strong(old_head, item, std::memory_order_relaxed)) {
-				bucket.count.fetch_add(1, std::memory_order_relaxed);
-				list_entries[item].next = item;
-				return {bucket_index, i + 1};
-			}
-			if (ops.equals(old_head, item)) { // totaly legit to use possibly invalid head here
-				bucket.count.fetch_add(1, std::memory_order_relaxed);
-				list_entries[item].next = bucket.head.exchange(item, std::memory_order_relaxed); // head can be invalid
-				return {-1, i + 1};
-			}
-
-			bucket_index = (bucket_index + 1) & split_size_m1;
+	[[nodiscard]] auto view(int start, int count) {
+		if (valid_range(start, count)) {
+			return lofi_view_t{data + start, count};
 		}
-
-		// we failed to find empty bucket within scan limit
-		return {-1, -1};
+		return lofi_view_t<type_t>{};
 	}
 
-	put_result_t put(int item) {
-		// try to insert to splits first
-		int total_scans = 0;
-		std::uint32_t hash = ops.hash(item);
-		for (int i = 0; i < capacity_split_coef; i++) {
-			const int offset = i << split_capacity_log2;
-			const int base_index = hash_to_index(hash, split_capacity_log2, split_capacity_m1);
-
-			auto [bucket_index, scans] = _put(buckets.get() + offset, split_capacity_m1, base_index, item, max_scans_per_split);
-			if (scans != -1) {
-				return {bucket_index != -1 ? bucket_index + offset : -1, total_scans + scans};
-			}
-
-			hash = hash_repeat(hash);
-			total_scans += max_scans_per_split;
-		}
-
-		// force insertion into the whole hashtable, no scan limit
-		const int size_m1 = (capacity_split_coef << split_capacity_log2) - 1;
-		const int size_log2 = capacity_split_coef_log2 + split_capacity_log2;
-
-		auto [bucket_index, scans] = _put(buckets.get(), size_m1, hash_to_index(hash, size_log2, size_m1), item, size_m1 + 1);
-		if (scans != -1) {
-			return {bucket_index, total_scans + scans};
-		}
-
-		// we failed to insert, must never happen if we do not go out of count limit
-		return {-1, -1};
+	[[nodiscard]] auto view_allocated() {
+		return lofi_view_t{data, allocated()};
 	}
 
 	// worker & master
-	lofi_bucket_t& get_bucket(int index) {
-		return buckets[index];
+	int allocated() const {
+		return top;
 	}
 
-	const lofi_bucket_t& get_bucket(int index) const {
-		return buckets[index];
+	bool valid_range(int start, int count) const {
+		return start + count <= capacity;
+		// return start < capacity && count <= capacity && start + count <= capacity; // stricter check
 	}
 
-	void redir(int bucket, int new_head) {
-		buckets[bucket].head.store(new_head, std::memory_order_relaxed);
-	}
-
-	template<class item_or_handle_t>
-	int _get(const lofi_bucket_t* buckets_split, int split_size_m1, int base_index, const item_or_handle_t& item, int max_scans) const {
-		int bucket_index = base_index;
-		for (int i = 0; i < max_scans; i++) {
-			auto& bucket = buckets_split[bucket_index];
-			int head = bucket.head.load(std::memory_order_relaxed);
-			if (head == -1) {
-				return -1;
-			}
-			if (ops.equals(head, item)) {
-				return bucket_index;
-			}
-			bucket_index = (bucket_index + 1) & split_size_m1;
-		}
-		return -1;
-	}
-
-	template<class item_or_handle_t>
-	int get(const item_or_handle_t& item) const {
-		// search in splits first
-		std::uint32_t hash = ops.hash(item);
-		for (int i = 0; i < max_scans_per_split; i++) {
-			const int offset = i << split_capacity_log2;
-			const int base_index = hash_to_index(hash, split_capacity_log2, split_capacity_m1);
-
-			int bucket = _get(buckets.get() + offset, split_capacity_m1, base_index, item, max_scans_per_split);
-			if (bucket != -1) {
-				return bucket + offset;
-			}
-
-			hash = hash_repeat(hash);
-		}
-
-		// search in whole hashtable
-		const int size_m1 = (capacity_split_coef << split_capacity_log2) - 1;
-		const int size_log2 = capacity_split_coef_log2 + split_capacity_log2;
-
-		return _get(buckets.get(), size_m1, hash_to_index(hash, size_log2, size_m1), item, size_m1 + 1);
-	}
-
-	int get_buckets_count() const {
-		return capacity_split_coef << split_capacity_log2;
-	}
-
-	int get_object_count() const {
-		return object_count;
-	}
-
-	lofi_item_iter_t iter(int bucket_index) const {
-		return lofi_item_iter_t{list_entries.get(), buckets[bucket_index].head.load(std::memory_order_relaxed)};
-	}
-
-
-	int split_capacity_m1{};
-	int split_capacity_log2{};
-
-	ops_t ops;
-
-	std::unique_ptr<lofi_bucket_t[]> buckets; // nextpow2(object_count) * inflation_coef
-	std::unique_ptr<lofi_list_entry_t[]> list_entries; // always size = object_count
-
-	const int max_capacity;
-	int object_count{};
-};
-
-template<class data_t>
-struct lofi_stack_t {
-	lofi_stack_t(int _max_size)
-		: max_size{_max_size} {
-		data = std::make_unique<data_t[]>(max_size);
-	}
-
-	// master
-	void reset() {
-		size.store(0, std::memory_order_relaxed);
-	}
-
-	// worker
-	data_t* push(int count) {
-		return data.get() + push_ext(count);
-	}
-
-	int push_ext(int count) {
-		return size.fetch_add(count, std::memory_order_relaxed);
-	}
-
-	// worker
-	data_t* get_data(int start) {
-		return data.get() + start;
-	}
-
-	// worker & master
-	int get_size() const {
-		return size.load(std::memory_order_relaxed);
-	}
-
-	data_t& operator[] (int i) {
-		return data[i];
-	}
-
-	const data_t& operator[] (int i) const {
-		return data[i];
-	}
-
-	const int max_size;
-	std::unique_ptr<data_t[]> data;
-	std::atomic<int> size{};
+	type_t* data{};
+	int capacity{};
+	int top{};
 };
